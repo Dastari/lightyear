@@ -11,8 +11,38 @@ use lightyear_inputs::input_buffer::InputBuffer;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+fn register_native_input_types<
+    A: Serialize
+        + DeserializeOwned
+        + Clone
+        + PartialEq
+        + Send
+        + Sync
+        + Debug
+        + Default
+        + 'static
+        + MapEntities
+        + Reflectable
+        + FromReflect,
+>(
+    app: &mut App,
+) {
+    app.register_type::<InputBuffer<ActionState<A>, A>>();
+    app.register_type::<ActionState<A>>();
+}
+
 #[derive(Default)]
 pub struct InputPlugin<A> {
+    pub config: InputConfig<A>,
+}
+
+#[derive(Default)]
+pub struct ClientInputPlugin<A> {
+    pub config: InputConfig<A>,
+}
+
+#[derive(Default)]
+pub struct ServerInputPlugin<A> {
     pub config: InputConfig<A>,
 }
 
@@ -32,10 +62,8 @@ impl<
 > Plugin for InputPlugin<A>
 {
     fn build(&self, app: &mut App) {
-        app.register_type::<InputBuffer<ActionState<A>, A>>();
-        app.register_type::<ActionState<A>>();
+        register_native_input_types::<A>(app);
 
-        // TODO: for simplicity, we currently register both client and server input plugins if both features are enabled
         #[cfg(feature = "client")]
         {
             use lightyear_inputs::client::ClientInputPlugin;
@@ -48,6 +76,63 @@ impl<
         {
             use lightyear_inputs::server::ServerInputPlugin;
             app.add_plugins(ServerInputPlugin::<NativeStateSequence<A>> {
+                rebroadcast_inputs: self.config.rebroadcast_inputs,
+                marker: core::marker::PhantomData,
+            });
+        }
+    }
+}
+
+impl<
+    A: Serialize
+        + DeserializeOwned
+        + Clone
+        + PartialEq
+        + Send
+        + Sync
+        + Debug
+        + Default
+        + 'static
+        + MapEntities
+        + Reflectable
+        + FromReflect,
+> Plugin for ClientInputPlugin<A>
+{
+    fn build(&self, app: &mut App) {
+        register_native_input_types::<A>(app);
+
+        #[cfg(feature = "client")]
+        {
+            use lightyear_inputs::client::ClientInputPlugin as GenericClientInputPlugin;
+            app.add_plugins(GenericClientInputPlugin::<NativeStateSequence<A>>::new(
+                self.config,
+            ));
+        }
+    }
+}
+
+impl<
+    A: Serialize
+        + DeserializeOwned
+        + Clone
+        + PartialEq
+        + Send
+        + Sync
+        + Debug
+        + Default
+        + 'static
+        + MapEntities
+        + Reflectable
+        + FromReflect,
+> Plugin for ServerInputPlugin<A>
+{
+    fn build(&self, app: &mut App) {
+        register_native_input_types::<A>(app);
+
+        #[cfg(feature = "server")]
+        {
+            use lightyear_inputs::server::ServerInputPlugin as GenericServerInputPlugin;
+            app.add_plugins(GenericServerInputPlugin::<NativeStateSequence<A>> {
                 rebroadcast_inputs: self.config.rebroadcast_inputs,
                 marker: core::marker::PhantomData,
             });
