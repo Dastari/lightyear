@@ -5,7 +5,7 @@ use crate::rollback::DeterministicPredicted;
 use bevy_ecs::prelude::*;
 use bevy_utils::prelude::DebugName;
 use core::ops::Deref;
-use lightyear_core::history_buffer::HistoryBuffer;
+use lightyear_core::history_buffer::{HistoryBuffer, HistoryState};
 use lightyear_core::prelude::LocalTimeline;
 use lightyear_core::timeline::SyncEvent;
 use lightyear_replication::prelude::{Confirmed, PreSpawned};
@@ -86,7 +86,7 @@ pub(crate) fn apply_component_removal_predicted<C: Component>(
 ///     because it should match the state of C in the history. We remove PreSpawned to make sure that we rollback to
 ///     the [`Confirmed<C>`] state
 ///   - if no match, we also remove PreSpawned, so that the entity is just Predicted (and we rollback to the last [`Confirmed<C>`] state)
-pub(crate) fn add_prediction_history<C: Component>(
+pub(crate) fn add_prediction_history<C: Component + Clone>(
     trigger: On<
         Add,
         (
@@ -98,9 +98,10 @@ pub(crate) fn add_prediction_history<C: Component>(
         ),
     >,
     mut commands: Commands,
+    timeline: Res<LocalTimeline>,
     // TODO: should we also have With<ShouldBePredicted>?
     query: Query<
-        (),
+        Option<&C>,
         (
             Without<PredictionHistory<C>>,
             Or<(With<Confirmed<C>>, With<C>)>,
@@ -112,14 +113,112 @@ pub(crate) fn add_prediction_history<C: Component>(
         ),
     >,
 ) {
-    if query.get(trigger.entity).is_ok() {
+    if let Ok(component) = query.get(trigger.entity) {
         trace!(
             "Add prediction history for {:?} on entity {:?}",
             DebugName::type_name::<C>(),
             trigger.entity
         );
-        commands
-            .entity(trigger.entity)
-            .insert(PredictionHistory::<C>::default());
+        let mut history = PredictionHistory::<C>::default();
+        if let Some(component) = component {
+            history.add_update(timeline.tick(), component.clone());
+        }
+        commands.entity(trigger.entity).insert(history);
+    }
+}
+
+/// When [`Predicted`] is inserted on an entity that already has prediction-relevant state, we need
+/// to ensure [`PredictionHistory<C>`] exists immediately.
+///
+/// This mirrors the interpolated late-attach bootstrap path:
+/// - `Predicted` first, then `C` / `Confirmed<C>`
+/// - `C` / `Confirmed<C>` first, then `Predicted`
+///
+/// The history is seeded with the current predicted value when `C` already exists so an immediate
+/// confirmed update does not spuriously rollback only because the history buffer was still empty.
+pub(crate) fn add_prediction_history_on_predicted<C: Component + Clone>(
+    trigger: On<Add, Predicted>,
+    mut commands: Commands,
+    timeline: Res<LocalTimeline>,
+    query: Query<
+        Option<&C>,
+        (
+            With<Predicted>,
+            Without<PredictionHistory<C>>,
+            Or<(With<Confirmed<C>>, With<C>)>,
+        ),
+    >,
+) {
+    if let Ok(component) = query.get(trigger.entity) {
+        trace!(
+            "Add prediction history for {:?} on predicted entity {:?}",
+            DebugName::type_name::<C>(),
+            trigger.entity
+        );
+        let mut history = PredictionHistory::<C>::default();
+        if let Some(component) = component {
+            history.add_update(timeline.tick(), component.clone());
+        }
+        commands.entity(trigger.entity).insert(history);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_app::App;
+    use lightyear_core::prelude::Tick;
+
+    #[derive(Component, Clone, PartialEq, Debug)]
+    struct TestComp(f32);
+
+    #[test]
+    fn seeds_prediction_history_when_component_added_on_predicted_entity() {
+        let mut app = App::new();
+        let mut timeline = LocalTimeline::default();
+        timeline.apply_delta(9);
+        app.insert_resource(timeline);
+        app.add_observer(add_prediction_history::<TestComp>);
+        app.add_observer(add_prediction_history_on_predicted::<TestComp>);
+
+        let entity = app.world_mut().spawn(Predicted).id();
+        app.update();
+        app.world_mut().entity_mut(entity).insert(TestComp(3.5));
+        app.update();
+
+        let history = app
+            .world()
+            .get::<PredictionHistory<TestComp>>(entity)
+            .expect("prediction history should exist");
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history.peek(),
+            Some(&(Tick(9), HistoryState::Updated(TestComp(3.5))))
+        );
+    }
+
+    #[test]
+    fn seeds_prediction_history_when_predicted_added_after_component_exists() {
+        let mut app = App::new();
+        let mut timeline = LocalTimeline::default();
+        timeline.apply_delta(17);
+        app.insert_resource(timeline);
+        app.add_observer(add_prediction_history::<TestComp>);
+        app.add_observer(add_prediction_history_on_predicted::<TestComp>);
+
+        let entity = app.world_mut().spawn(TestComp(6.25)).id();
+        app.update();
+        app.world_mut().entity_mut(entity).insert(Predicted);
+        app.update();
+
+        let history = app
+            .world()
+            .get::<PredictionHistory<TestComp>>(entity)
+            .expect("prediction history should exist");
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history.peek(),
+            Some(&(Tick(17), HistoryState::Updated(TestComp(6.25))))
+        );
     }
 }

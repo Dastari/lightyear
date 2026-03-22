@@ -10,7 +10,7 @@ use crate::despawn::PredictionDisable;
 use crate::diagnostics::PredictionDiagnosticsPlugin;
 use crate::manager::PredictionManager;
 use crate::predicted_history::{
-    add_prediction_history, apply_component_removal_predicted,
+    add_prediction_history, add_prediction_history_on_predicted, apply_component_removal_predicted,
     handle_tick_event_prediction_history, update_prediction_history,
 };
 use crate::registry::PredictionRegistry;
@@ -69,6 +69,7 @@ pub(crate) fn should_run(query: Query<(), PredictionFilter>) -> bool {
 pub fn add_non_networked_rollback_systems<C: SyncComponent>(app: &mut App) {
     app.add_observer(apply_component_removal_predicted::<C>);
     app.add_observer(add_prediction_history::<C>);
+    app.add_observer(add_prediction_history_on_predicted::<C>);
     app.add_systems(
         PreUpdate,
         prepare_rollback::<C>.in_set(RollbackSystems::Prepare),
@@ -149,6 +150,7 @@ pub(crate) fn add_prediction_systems<C: SyncComponent>(app: &mut App) {
     app.add_observer(apply_component_removal_predicted::<C>);
     app.add_observer(handle_tick_event_prediction_history::<C>);
     app.add_observer(add_prediction_history::<C>);
+    app.add_observer(add_prediction_history_on_predicted::<C>);
 
     app.add_systems(
         PreUpdate,
