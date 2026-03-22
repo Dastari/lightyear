@@ -69,9 +69,9 @@ use {
 };
 
 use lightyear_frame_interpolation::FrameInterpolationSystems;
-use lightyear_interpolation::prelude::InterpolationRegistry;
+use lightyear_interpolation::prelude::{Interpolated, InterpolationRegistry};
 use lightyear_prediction::plugin::PredictionSystems;
-use lightyear_prediction::prelude::{PredictionAppRegistrationExt, RollbackSystems};
+use lightyear_prediction::prelude::{Predicted, PredictionAppRegistrationExt, RollbackSystems};
 use lightyear_replication::prelude::TransformLinearInterpolation;
 
 /// Indicate which components you are replicating over the network
@@ -388,6 +388,8 @@ impl LightyearAvianPlugin {
                 .in_set(PhysicsTransformSystems::PositionToTransform)
                 .run_if(|config: Res<PhysicsTransformConfig>| config.position_to_transform),
         );
+        app.add_observer(Self::add_transform_on_predicted_added);
+        app.add_observer(Self::add_transform_on_interpolated_added);
     }
 
     // /// Add Transform only when Position/Rotation are both present and Transform is not.
@@ -492,6 +494,107 @@ impl LightyearAvianPlugin {
     /// - We cannot just add GlobalTransform because the PositionToTransform systems requires the
     ///   `Transform` component to be present
     /// - Therefore we try to compute the correct `Transform`
+    fn transform_from_position_rotation(
+        pos: &Position,
+        rot: &Rotation,
+        parent: Option<&ChildOf>,
+        parents: &Query<(
+            Option<&GlobalTransform>,
+            Option<&Position>,
+            Option<&Rotation>,
+        )>,
+    ) -> Transform {
+        let mut transform = Transform::default();
+        #[cfg(feature = "2d")]
+        if let Some(&ChildOf(parent)) = parent {
+            if let Ok((parent_global_transform, parent_pos, parent_rot)) = parents.get(parent) {
+                let parent_transform = parent_global_transform
+                    .unwrap_or(&GlobalTransform::IDENTITY)
+                    .compute_transform();
+                let parent_pos = parent_pos.map_or(parent_transform.translation, |pos| {
+                    pos.f32().extend(parent_transform.translation.z)
+                });
+                let parent_rot = parent_rot.map_or(parent_transform.rotation, |rot| {
+                    Quaternion::from(*rot).f32()
+                });
+                let parent_scale = parent_transform.scale;
+                let parent_transform = Transform::from_translation(parent_pos)
+                    .with_rotation(parent_rot)
+                    .with_scale(parent_scale);
+
+                let new_transform = GlobalTransform::from(
+                    Transform::from_translation(pos.f32().extend(parent_transform.translation.z))
+                        .with_rotation(Quaternion::from(*rot).f32()),
+                )
+                .reparented_to(&GlobalTransform::from(parent_transform));
+
+                transform.translation = new_transform.translation;
+                transform.rotation = new_transform.rotation;
+                return transform;
+            }
+        }
+        #[cfg(feature = "2d")]
+        {
+            transform.translation = pos.f32().extend(transform.translation.z);
+            transform.rotation = Quaternion::from(*rot).f32();
+            return transform;
+        }
+
+        #[cfg(feature = "3d")]
+        if let Some(&ChildOf(parent)) = parent {
+            if let Ok((parent_global_transform, parent_pos, parent_rot)) = parents.get(parent) {
+                let parent_transform = parent_global_transform
+                    .unwrap_or(&GlobalTransform::IDENTITY)
+                    .compute_transform();
+                let parent_pos = parent_pos.map_or(parent_transform.translation, |pos| pos.f32());
+                let parent_rot = parent_rot.map_or(parent_transform.rotation, |rot| rot.f32());
+                let parent_scale = parent_transform.scale;
+                let parent_transform = Transform::from_translation(parent_pos)
+                    .with_rotation(parent_rot)
+                    .with_scale(parent_scale);
+
+                let new_transform = GlobalTransform::from(
+                    Transform::from_translation(pos.f32()).with_rotation(rot.f32()),
+                )
+                .reparented_to(&GlobalTransform::from(parent_transform));
+
+                transform.translation = new_transform.translation;
+                transform.rotation = new_transform.rotation;
+                return transform;
+            }
+        }
+        #[cfg(feature = "3d")]
+        {
+            transform.translation = pos.f32();
+            transform.rotation = rot.f32();
+            transform
+        }
+    }
+
+    fn add_transform_for_existing_spatial_entity(
+        entity: Entity,
+        query: &Query<(&Position, &Rotation, Option<&ChildOf>), Without<Transform>>,
+        parents: &Query<(
+            Option<&GlobalTransform>,
+            Option<&Position>,
+            Option<&Rotation>,
+        )>,
+        commands: &mut Commands,
+        reason: &'static str,
+    ) {
+        let Ok((pos, rot, parent)) = query.get(entity) else {
+            return;
+        };
+        let transform = Self::transform_from_position_rotation(pos, rot, parent, parents);
+        trace!(
+            ?transform,
+            ?entity,
+            reason,
+            "Adding transform for existing spatial entity"
+        );
+        commands.entity(entity).insert(transform);
+    }
+
     fn add_transform(
         query: Query<(Entity, Ref<Position>, Ref<Rotation>, Option<&ChildOf>), Without<Transform>>,
         parents: Query<(
@@ -505,72 +608,7 @@ impl LightyearAvianPlugin {
             if !(pos.is_added() || rot.is_added()) {
                 return;
             }
-            let mut transform = Transform::default();
-            #[cfg(feature = "2d")]
-            if let Some(&ChildOf(parent)) = parent {
-                if let Ok((parent_global_transform, parent_pos, parent_rot)) = parents.get(parent) {
-                    // Compute the global transform of the parent using its Position and Rotation
-                    let parent_transform = parent_global_transform
-                        .unwrap_or(&GlobalTransform::IDENTITY)
-                        .compute_transform();
-                    let parent_pos = parent_pos.map_or(parent_transform.translation, |pos| {
-                        pos.f32().extend(parent_transform.translation.z)
-                    });
-                    let parent_rot = parent_rot.map_or(parent_transform.rotation, |rot| {
-                        Quaternion::from(*rot).f32()
-                    });
-                    let parent_scale = parent_transform.scale;
-                    let parent_transform = Transform::from_translation(parent_pos)
-                        .with_rotation(parent_rot)
-                        .with_scale(parent_scale);
-
-                    // The new local transform of the child body,
-                    // computed from the its global transform and its parents global transform
-                    let new_transform = GlobalTransform::from(
-                        Transform::from_translation(
-                            pos.f32().extend(parent_transform.translation.z),
-                        )
-                        .with_rotation(Quaternion::from(*rot).f32()),
-                    )
-                    .reparented_to(&GlobalTransform::from(parent_transform));
-
-                    transform.translation = new_transform.translation;
-                    transform.rotation = new_transform.rotation;
-                }
-            } else {
-                transform.translation = pos.f32().extend(transform.translation.z);
-                transform.rotation = Quaternion::from(*rot).f32();
-            }
-
-            #[cfg(feature = "3d")]
-            if let Some(&ChildOf(parent)) = parent {
-                if let Ok((parent_global_transform, parent_pos, parent_rot)) = parents.get(parent) {
-                    // Compute the global transform of the parent using its Position and Rotation
-                    let parent_transform = parent_global_transform
-                        .unwrap_or(&GlobalTransform::IDENTITY)
-                        .compute_transform();
-                    let parent_pos =
-                        parent_pos.map_or(parent_transform.translation, |pos| pos.f32());
-                    let parent_rot = parent_rot.map_or(parent_transform.rotation, |rot| rot.f32());
-                    let parent_scale = parent_transform.scale;
-                    let parent_transform = Transform::from_translation(parent_pos)
-                        .with_rotation(parent_rot)
-                        .with_scale(parent_scale);
-
-                    // The new local transform of the child body,
-                    // computed from the its global transform and its parents global transform
-                    let new_transform = GlobalTransform::from(
-                        Transform::from_translation(pos.f32()).with_rotation(rot.f32()),
-                    )
-                    .reparented_to(&GlobalTransform::from(parent_transform));
-
-                    transform.translation = new_transform.translation;
-                    transform.rotation = new_transform.rotation;
-                }
-            } else {
-                transform.translation = pos.f32();
-                transform.rotation = rot.f32();
-            }
+            let transform = Self::transform_from_position_rotation(&pos, &rot, parent, &parents);
 
             trace!(
                 ?transform,
@@ -578,6 +616,44 @@ impl LightyearAvianPlugin {
             );
             commands.entity(entity).insert(transform);
         });
+    }
+
+    fn add_transform_on_predicted_added(
+        trigger: On<Add, Predicted>,
+        query: Query<(&Position, &Rotation, Option<&ChildOf>), Without<Transform>>,
+        parents: Query<(
+            Option<&GlobalTransform>,
+            Option<&Position>,
+            Option<&Rotation>,
+        )>,
+        mut commands: Commands,
+    ) {
+        Self::add_transform_for_existing_spatial_entity(
+            trigger.entity,
+            &query,
+            &parents,
+            &mut commands,
+            "predicted_added",
+        );
+    }
+
+    fn add_transform_on_interpolated_added(
+        trigger: On<Add, Interpolated>,
+        query: Query<(&Position, &Rotation, Option<&ChildOf>), Without<Transform>>,
+        parents: Query<(
+            Option<&GlobalTransform>,
+            Option<&Position>,
+            Option<&Rotation>,
+        )>,
+        mut commands: Commands,
+    ) {
+        Self::add_transform_for_existing_spatial_entity(
+            trigger.entity,
+            &query,
+            &parents,
+            &mut commands,
+            "interpolated_added",
+        );
     }
 
     /// Update the child's Position based on the paren't Position and the child's Transform.
@@ -615,5 +691,55 @@ impl LightyearAvianPlugin {
                     .into();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_app::App;
+
+    #[test]
+    fn predicted_added_to_existing_spatial_entity_inserts_transform() {
+        let mut app = App::new();
+        app.add_observer(LightyearAvianPlugin::add_transform_on_predicted_added);
+
+        let entity = app
+            .world_mut()
+            .spawn((Position(Vector::new(12.0, -4.0)), Rotation::degrees(90.0)))
+            .id();
+
+        app.update();
+        app.world_mut().entity_mut(entity).insert(Predicted);
+        app.update();
+
+        let transform = app
+            .world()
+            .get::<Transform>(entity)
+            .expect("transform should be inserted when predicted is added late");
+        assert_eq!(transform.translation.x, 12.0);
+        assert_eq!(transform.translation.y, -4.0);
+    }
+
+    #[test]
+    fn interpolated_added_to_existing_spatial_entity_inserts_transform() {
+        let mut app = App::new();
+        app.add_observer(LightyearAvianPlugin::add_transform_on_interpolated_added);
+
+        let entity = app
+            .world_mut()
+            .spawn((Position(Vector::new(-8.0, 3.5)), Rotation::degrees(-45.0)))
+            .id();
+
+        app.update();
+        app.world_mut().entity_mut(entity).insert(Interpolated);
+        app.update();
+
+        let transform = app
+            .world()
+            .get::<Transform>(entity)
+            .expect("transform should be inserted when interpolated is added late");
+        assert_eq!(transform.translation.x, -8.0);
+        assert_eq!(transform.translation.y, 3.5);
     }
 }

@@ -5,7 +5,9 @@ use crate::rollback::DeterministicPredicted;
 use bevy_ecs::prelude::*;
 use bevy_utils::prelude::DebugName;
 use core::ops::Deref;
-use lightyear_core::history_buffer::{HistoryBuffer, HistoryState};
+use lightyear_core::history_buffer::HistoryBuffer;
+#[cfg(test)]
+use lightyear_core::history_buffer::HistoryState;
 use lightyear_core::prelude::LocalTimeline;
 use lightyear_core::timeline::SyncEvent;
 use lightyear_replication::prelude::{Confirmed, PreSpawned};
