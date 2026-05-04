@@ -19,8 +19,11 @@ required-features = ["3d"]
 bench = false
 
 [features]
-default = ["std", "3d", "avian3d/parry-f32"]
+default = ["std", "3d", "parry-f32"]
 f32 = ["avian3d/f32"]
+f64 = ["avian3d/f64"]
+parry-f32 = ["avian3d/parry-f32"]
+parry-f64 = ["avian3d/parry-f64"]
 3d = ["avian3d/3d"]
 std = ["lightyear_prediction/std"]
 deterministic = ["dep:seahash"]

@@ -292,6 +292,24 @@ impl Plugin for LightyearAvianPlugin {
             }
         }
 
+        // Avian's ColliderOf::on_insert requires GlobalTransform to set up
+        // the RigidBodyColliders relationship. Since PhysicsTransformPlugin is disabled,
+        // we register Transform as required for Collider so GlobalTransform is present.
+        #[cfg(all(
+            feature = "3d",
+            not(feature = "2d"),
+            any(feature = "parry-f32", feature = "parry-f64")
+        ))]
+        app.try_register_required_components::<avian3d::collision::collider::Collider, Transform>()
+            .ok();
+        #[cfg(all(
+            feature = "2d",
+            not(feature = "3d"),
+            any(feature = "parry-f32", feature = "parry-f64")
+        ))]
+        app.try_register_required_components::<avian2d::collision::collider::Collider, Transform>()
+            .ok();
+
         if self.rollback_resources {
             app.init_resource::<ContactGraph>();
             app.init_resource::<ConstraintGraph>();
@@ -361,11 +379,10 @@ impl LightyearAvianPlugin {
             app.register_required_components::<Position, ApplyPosToTransform>();
             app.register_required_components::<Rotation, ApplyPosToTransform>();
 
-            // TODO(important): handle this
-            // NOTE: we do NOT include this because Position/Rotation might not be added at the same time (for example on the Interpolated entity)
-            //  we only want to add Transform if both are added at the same time
-            // app.try_register_required_components::<Position, Transform>().ok();
-            // app.try_register_required_components::<Rotation, Transform>().ok();
+            // NOTE: we do NOT register Transform as required for Position/Rotation because
+            //  they might not be added at the same time (e.g. on Interpolated entities).
+            //  The `add_transform` system below handles adding Transform when both are present.
+            //  For physics entities, Transform is registered as required for Collider above.
         }
         let schedule = schedule.intern();
 
@@ -699,6 +716,17 @@ mod tests {
     use super::*;
     use bevy_app::App;
 
+    fn test_position(x: f32, y: f32) -> Position {
+        #[cfg(feature = "2d")]
+        {
+            Position(Vector::new(x, y))
+        }
+        #[cfg(feature = "3d")]
+        {
+            Position(Vector::new(x, y, 0.0))
+        }
+    }
+
     #[test]
     fn predicted_added_to_existing_spatial_entity_inserts_transform() {
         let mut app = App::new();
@@ -706,7 +734,7 @@ mod tests {
 
         let entity = app
             .world_mut()
-            .spawn((Position(Vector::new(12.0, -4.0)), Rotation::degrees(90.0)))
+            .spawn((test_position(12.0, -4.0), Rotation::default()))
             .id();
 
         app.update();
@@ -728,7 +756,7 @@ mod tests {
 
         let entity = app
             .world_mut()
-            .spawn((Position(Vector::new(-8.0, 3.5)), Rotation::degrees(-45.0)))
+            .spawn((test_position(-8.0, 3.5), Rotation::default()))
             .id();
 
         app.update();
