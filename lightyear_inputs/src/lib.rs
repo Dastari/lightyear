@@ -20,7 +20,13 @@ pub mod plugin;
 #[cfg(feature = "server")]
 pub mod server;
 
-pub(crate) const HISTORY_DEPTH: u16 = 20;
+// Keep enough input history to cover Sidereal's configured rollback budget.
+//
+// Upstream Lightyear 0.26.4 keeps only 20 ticks here, which is smaller than common rollback
+// windows in high-latency or localhost jitter scenarios. If a correction rolls back beyond this
+// depth, the client replays missing/neutral input and the predicted body can snap back to an older
+// seed. This should eventually become a public input config setting upstream.
+pub(crate) const HISTORY_DEPTH: u16 = 512;
 
 /// Default channel to send inputs from client to server. This is a Sequenced Unreliable channel.
 /// A marker struct for the default channel used to send inputs from client to server.

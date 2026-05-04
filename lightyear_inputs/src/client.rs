@@ -129,12 +129,6 @@ impl<S: ActionStateSequence> ClientInputPlugin<S> {
     }
 }
 
-impl<S: ActionStateSequence> ClientInputPlugin<S> {
-    fn default() -> Self {
-        Self::new(InputConfig::default())
-    }
-}
-
 impl<S: ActionStateSequence + MapEntities> Plugin for ClientInputPlugin<S> {
     fn build(&self, app: &mut App) {
         if !app.is_plugin_added::<InputPlugin<S>>() {
@@ -430,7 +424,7 @@ fn clean_buffers<S: ActionStateSequence>(
     timeline: Res<LocalTimeline>,
     // NOTE: we skip this for host-client because the get_action_state system on the server
     //  also clears the buffers
-    sender: Single<(), (With<InputTimeline>, Without<HostClient>)>,
+    _sender: Single<(), (With<InputTimeline>, Without<HostClient>)>,
     mut input_buffer_query: Query<
         &mut InputBuffer<S::Snapshot, S::Action>,
         Allow<PredictionDisable>,
@@ -603,7 +597,7 @@ fn receive_remote_player_input_messages<S: ActionStateSequence>(
                 InputTarget::Entity(entity) => {
                     Some(entity)
                 }
-                InputTarget::PreSpawned(hash) => {
+                InputTarget::PreSpawned(_hash) => {
                     // TODO: should clients receive rebroadcasted PreSpawned using the hash?
                     //  if they don't receive the remote clients inputs in time, they cannot prespawn, so maybe they should just use the entity?
                     //  Ideally, we could only pre-spawn on the controlling client (so we need a PrespawnTarget)?

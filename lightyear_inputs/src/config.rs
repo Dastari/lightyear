@@ -59,5 +59,6 @@ impl<A> Default for InputConfig<A> {
 /// Used to avoid creating some systems multiple times
 #[derive(Default, Resource)]
 pub(crate) struct SharedInputConfig {
+    #[allow(dead_code)]
     pub(crate) reset_last_confirmed_system_added: bool,
 }
