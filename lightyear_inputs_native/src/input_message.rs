@@ -21,7 +21,7 @@ pub struct NativeStateSequence<A> {
 impl<A: Debug + Default + PartialEq + Clone + Send + Sync + 'static> InputSnapshot
     for ActionState<A>
 {
-    fn decay_tick(&mut self, tick_duration: Duration) {}
+    fn decay_tick(&mut self, _tick_duration: Duration) {}
 }
 
 impl<A> IntoIterator for NativeStateSequence<A> {
@@ -65,7 +65,7 @@ impl<
 
     fn get_snapshots_from_message(
         self,
-        tick_duration: Duration,
+        _tick_duration: Duration,
     ) -> impl Iterator<Item = Compressed<Self::Snapshot>> {
         self.states.into_iter().map(|input| match input {
             Compressed::Absent => Compressed::Absent,

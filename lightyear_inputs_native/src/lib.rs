@@ -59,12 +59,12 @@ extern crate std;
 
 pub(crate) mod action_state;
 
-pub(crate) mod input_message;
+pub mod input_message;
 
 pub mod plugin;
 
 pub mod prelude {
     pub use crate::action_state::{ActionState, InputMarker};
-    pub use crate::input_message::NativeBuffer;
+    pub use crate::input_message::{NativeBuffer, NativeStateSequence};
     pub use crate::plugin::InputPlugin;
 }
