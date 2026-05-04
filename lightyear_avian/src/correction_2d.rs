@@ -34,7 +34,7 @@ use tracing::{info, trace};
 pub(crate) fn update_frame_interpolation_post_rollback(
     time: Res<Time<Fixed>>,
     local_timeline: Res<LocalTimeline>,
-    predicted: Single<(), With<PredictionManager>>,
+    _predicted: Single<(), With<PredictionManager>>,
     registry: Res<InterpolationRegistry>,
     mut query: Query<(
         Entity,
@@ -138,7 +138,7 @@ pub(crate) fn add_visual_correction(
         .for_each(|(entity, mut component, mut visual_correction)| {
             if !prediction.should_rollback(
                 &Position::default(),
-                &Position(visual_correction.error.translation),
+                &Position(visual_correction.error.translation.into()),
             ) && !prediction.should_rollback(
                 &Rotation::default(),
                 &Rotation::from(visual_correction.error.rotation),
