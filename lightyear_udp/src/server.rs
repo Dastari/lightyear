@@ -6,11 +6,17 @@ This crate provides abstractions for sending and receiving raw bytes over the ne
 
 extern crate alloc;
 
+use std::{
+    collections::VecDeque,
+    io::ErrorKind,
+    time::{Duration, Instant as StdInstant},
+};
+
 use bevy_app::{App, Plugin, PostUpdate, PreUpdate};
 use bevy_ecs::prelude::*;
 use bevy_ecs::relationship::RelationshipTarget;
 use bevy_ecs::system::ParallelCommands;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::UdpError;
 use aeronet_io::connection::{LocalAddr, PeerAddr};
@@ -19,7 +25,9 @@ use bytes::{BufMut, BytesMut};
 use core::net::SocketAddr;
 use lightyear_core::time::Instant;
 use lightyear_link::prelude::{LinkOf, Server};
-use lightyear_link::{Link, LinkPlugin, LinkStart, LinkSystems, Linked, Linking, Unlink, Unlinked};
+use lightyear_link::{
+    Link, LinkPlugin, LinkStart, LinkSystems, Linked, Linking, SendPayload, Unlink, Unlinked,
+};
 
 /// Maximum transmission units; maximum size in bytes of a UDP packet
 /// See: <https://gafferongames.com/post/packet_fragmentation_and_reassembly/>
@@ -64,6 +72,51 @@ impl Default for ServerUdpIo {
 
 pub struct ServerUdpPlugin;
 
+#[derive(Default)]
+struct UdpSendBackpressureLog {
+    last_warn_at: Option<StdInstant>,
+    suppressed: u32,
+}
+
+const UDP_SEND_BACKPRESSURE_LOG_INTERVAL: Duration = Duration::from_secs(1);
+
+fn requeue_unsent_payloads(
+    link: &mut Link,
+    first_unsent: SendPayload,
+    pending: VecDeque<SendPayload>,
+) {
+    link.send.push(first_unsent);
+    for payload in pending {
+        link.send.push(payload);
+    }
+}
+
+fn log_udp_send_backpressure(
+    log_state: &mut UdpSendBackpressureLog,
+    remote_addr: SocketAddr,
+    queued_packets: usize,
+    error: &std::io::Error,
+) {
+    let now = StdInstant::now();
+    let should_warn = log_state
+        .last_warn_at
+        .is_none_or(|last_warn_at| now.duration_since(last_warn_at) >= UDP_SEND_BACKPRESSURE_LOG_INTERVAL);
+
+    if should_warn {
+        let suppressed = log_state.suppressed;
+        log_state.suppressed = 0;
+        log_state.last_warn_at = Some(now);
+        warn!(
+            %remote_addr,
+            queued_packets,
+            suppressed,
+            "UDP send backpressure; preserving queued packets for next frame: {error}",
+        );
+    } else {
+        log_state.suppressed = log_state.suppressed.saturating_add(1);
+    }
+}
+
 impl ServerUdpPlugin {
     // TODO: we don't want this system to panic on error
     fn link(
@@ -95,6 +148,7 @@ impl ServerUdpPlugin {
     fn send(
         mut server_query: Query<(&mut ServerUdpIo, &Server), With<Linked>>,
         mut link_query: Query<(&mut Link, &PeerAddr), With<UdpLinkOfIO>>,
+        mut backpressure_log: Local<UdpSendBackpressureLog>,
     ) {
         // TODO: parallelize
         server_query
@@ -108,17 +162,32 @@ impl ServerUdpPlugin {
                         return;
                     };
 
-                    link.send.drain().for_each(|send_payload| {
-                        server_udp_io
+                    let mut pending = link.send.drain().collect::<VecDeque<_>>();
+                    while let Some(send_payload) = pending.pop_front() {
+                        let send_result = server_udp_io
                             .socket
                             .as_mut()
                             .unwrap()
-                            .send_to(send_payload.as_ref(), remote_addr.0)
-                            .inspect_err(|e| {
-                                error!("Error sending UDP packet to {}: {}", remote_addr.0, e);
-                            })
-                            .ok();
-                    });
+                            .send_to(send_payload.as_ref(), remote_addr.0);
+
+                        match send_result {
+                            Ok(_) => {}
+                            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                                let queued_packets = pending.len() + 1;
+                                requeue_unsent_payloads(&mut link, send_payload, pending);
+                                log_udp_send_backpressure(
+                                    &mut backpressure_log,
+                                    remote_addr.0,
+                                    queued_packets,
+                                    &error,
+                                );
+                                break;
+                            }
+                            Err(error) => {
+                                error!("Error sending UDP packet to {}: {}", remote_addr.0, error);
+                            }
+                        }
+                    }
                 });
             });
     }
@@ -241,7 +310,7 @@ impl ServerUdpPlugin {
                 }
 
                 // set every spawning to spawned
-                server_udp_io.connected_addresses.iter_mut().for_each(|(addr, status)| {
+                server_udp_io.connected_addresses.iter_mut().for_each(|(_addr, status)| {
                     if let LinkOfStatus::Spawning(entity) = status {
                         *status = LinkOfStatus::Spawned(*entity);
                     }

@@ -11,7 +11,7 @@
 //!
 //! It also includes server-specific UDP IO handling when the "server" feature is enabled.
 
-use std::{io::ErrorKind, net::UdpSocket};
+use std::{collections::VecDeque, io::ErrorKind, net::UdpSocket};
 
 use aeronet_io::connection::{LocalAddr, PeerAddr};
 use bevy_app::prelude::*;
@@ -21,7 +21,7 @@ use lightyear_core::time::Instant;
 use lightyear_link::{
     Link, LinkPlugin, LinkReceiveSystems, LinkStart, LinkSystems, Linked, Linking, Unlink, Unlinked,
 };
-use tracing::{error, info, trace};
+use tracing::{debug, error, info, trace};
 
 /// Provides server-specific UDP IO functionalities.
 /// This module is only available when the "server" feature is enabled.
@@ -112,18 +112,36 @@ impl UdpPlugin {
         query
             .par_iter_mut()
             .for_each(|(mut link, mut udp_io, remote_addr)| {
-                link.send.drain().for_each(|payload| {
+                let mut pending = link.send.drain().collect::<VecDeque<_>>();
+                while let Some(payload) = pending.pop_front() {
                     // B/s
                     #[cfg(feature = "metrics")]
                     metrics::gauge!("udp/send").increment(payload.len() as f64);
-                    udp_io
+
+                    let send_result = udp_io
                         .socket
                         .as_mut()
                         .unwrap()
-                        .send_to(payload.as_ref(), remote_addr.0)
-                        .inspect_err(|e| error!("Error sending UDP packet: {}", e))
-                        .ok();
-                });
+                        .send_to(payload.as_ref(), remote_addr.0);
+
+                    match send_result {
+                        Ok(_) => {}
+                        Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                            let queued_packets = pending.len() + 1;
+                            link.send.push(payload);
+                            for pending_payload in pending {
+                                link.send.push(pending_payload);
+                            }
+                            debug!(
+                                remote_addr = %remote_addr.0,
+                                queued_packets,
+                                "UDP send backpressure; preserving queued packets for next frame: {error}",
+                            );
+                            break;
+                        }
+                        Err(error) => error!("Error sending UDP packet: {}", error),
+                    }
+                }
             })
     }
 
