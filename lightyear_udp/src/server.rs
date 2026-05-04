@@ -98,9 +98,9 @@ fn log_udp_send_backpressure(
     error: &std::io::Error,
 ) {
     let now = StdInstant::now();
-    let should_warn = log_state
-        .last_warn_at
-        .is_none_or(|last_warn_at| now.duration_since(last_warn_at) >= UDP_SEND_BACKPRESSURE_LOG_INTERVAL);
+    let should_warn = log_state.last_warn_at.is_none_or(|last_warn_at| {
+        now.duration_since(last_warn_at) >= UDP_SEND_BACKPRESSURE_LOG_INTERVAL
+    });
 
     if should_warn {
         let suppressed = log_state.suppressed;

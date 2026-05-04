@@ -72,9 +72,7 @@ pub(crate) fn update_confirmed_history<C: Component + Clone>(
 
         // Seed on first sync with the second-oldest (or oldest if that's all we have) so
         // interpolate()'s first run has a sensible starting value while the blend warms up.
-        if !present
-            && let Some((_, value)) = history.end().or(history.start())
-        {
+        if !present && let Some((_, value)) = history.end().or(history.start()) {
             commands.entity(entity).insert(value.clone());
         }
 
@@ -398,10 +396,8 @@ mod tests {
             current_tick,
             Default::default(),
         ));
-        app.world_mut().spawn((
-            timeline,
-            IsSynced::<InterpolationTimeline>::default(),
-        ));
+        app.world_mut()
+            .spawn((timeline, IsSynced::<InterpolationTimeline>::default()));
         app.add_systems(Update, update_confirmed_history::<TestComp>);
         app
     }
@@ -417,10 +413,16 @@ mod tests {
         app.update();
 
         let component = app.world().get::<TestComp>(entity).unwrap();
-        let history = app.world().get::<ConfirmedHistory<TestComp>>(entity).unwrap();
+        let history = app
+            .world()
+            .get::<ConfirmedHistory<TestComp>>(entity)
+            .unwrap();
         assert_eq!(*component, TestComp(10.0));
         assert_eq!(history.len(), 1);
-        assert_eq!(history.newest().map(|(tick, value)| (tick, value.clone())), Some((Tick(30), TestComp(10.0))));
+        assert_eq!(
+            history.newest().map(|(tick, value)| (tick, value.clone())),
+            Some((Tick(30), TestComp(10.0)))
+        );
     }
 
     #[test]
@@ -434,9 +436,18 @@ mod tests {
 
         app.update();
 
-        let history = app.world().get::<ConfirmedHistory<TestComp>>(entity).unwrap();
+        let history = app
+            .world()
+            .get::<ConfirmedHistory<TestComp>>(entity)
+            .unwrap();
         assert_eq!(history.len(), 2);
-        assert_eq!(history.start().map(|(tick, value)| (tick, value.clone())), Some((Tick(10), TestComp(10.0))));
-        assert_eq!(history.end().map(|(tick, value)| (tick, value.clone())), Some((Tick(20), TestComp(20.0))));
+        assert_eq!(
+            history.start().map(|(tick, value)| (tick, value.clone())),
+            Some((Tick(10), TestComp(10.0)))
+        );
+        assert_eq!(
+            history.end().map(|(tick, value)| (tick, value.clone())),
+            Some((Tick(20), TestComp(20.0)))
+        );
     }
 }
