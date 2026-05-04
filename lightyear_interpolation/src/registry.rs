@@ -19,6 +19,7 @@ fn lerp<C: Ease + Clone>(start: C, other: C, t: f32) -> C {
 }
 
 /// Function that will sync a component value from the confirmed entity to the interpolated entity
+#[allow(dead_code)]
 type SyncFn = fn(
     &InterpolationRegistry,
     &ComponentRegistry,
