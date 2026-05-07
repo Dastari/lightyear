@@ -12,7 +12,7 @@ use bevy_ecs::schedule::common_conditions::not;
 #[cfg(any(feature = "client", feature = "server"))]
 use bevy_enhanced_input::EnhancedInputSystems;
 #[cfg(feature = "client")]
-use bevy_enhanced_input::action::ActionState;
+use bevy_enhanced_input::action::TriggerState;
 use bevy_enhanced_input::context::InputContextAppExt;
 use bevy_enhanced_input::prelude::ActionOf;
 use bevy_reflect::TypePath;
@@ -57,7 +57,6 @@ impl<
 > Plugin for InputPlugin<C>
 {
     fn build(&self, app: &mut App) {
-        app.register_type::<ActionOf<C>>();
         if !app.is_plugin_added::<bevy_enhanced_input::EnhancedInputPlugin>() {
             app.add_plugins(bevy_enhanced_input::EnhancedInputPlugin);
         }
@@ -75,15 +74,17 @@ impl<
         #[cfg(feature = "client")]
         {
             use crate::marker::{
-                add_input_marker_from_binding, add_input_marker_from_parent, propagate_input_marker,
+                add_input_marker_from_authority, add_input_marker_from_binding,
+                add_input_marker_from_parent, propagate_input_marker,
             };
-            // for rebroadcasting inputs, we insert ActionState (which inserts the InputBuffer) when ActionOf<C> is added
+            // for rebroadcasting inputs, we insert TriggerState (which inserts the InputBuffer) when ActionOf<C> is added
             // on an entity
-            app.register_required_components::<ActionOf<C>, ActionState>();
+            app.register_required_components::<ActionOf<C>, TriggerState>();
 
             app.add_observer(propagate_input_marker::<C>);
             app.add_observer(add_input_marker_from_parent::<C>);
             app.add_observer(add_input_marker_from_binding::<C>);
+            app.add_observer(add_input_marker_from_authority::<C>);
 
             if self.config.rebroadcast_inputs {
                 app.add_observer(InputRegistryPlugin::on_rebroadcast_action_received::<C>);
@@ -105,7 +106,7 @@ impl<
                     // do not run Update during rollback as we already know all inputs
                     EnhancedInputSystems::Update.run_if(not(is_in_rollback)),
                     InputSystems::BufferClientInputs,
-                    // Apply is after BufferClientInputs so that events can re-trigger after we update the ActionState from Buffer during rollbacks
+                    // Apply is after BufferClientInputs so that events can re-trigger after we update the TriggerState from Buffer during rollbacks
                     EnhancedInputSystems::Apply,
                 )
                     .chain(),
@@ -140,7 +141,7 @@ impl<
                 );
             }
 
-            // Make sure that we update the ActionState using the received messages before
+            // Make sure that we update the TriggerState using the received messages before
             // triggering BEI events
             app.configure_sets(
                 FixedPreUpdate,

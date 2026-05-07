@@ -66,3 +66,16 @@ pub(crate) fn add_input_marker_from_binding<C: Component>(
             .insert(InputMarker::<C>::default());
     }
 }
+
+/// If authority is added after Bindings or ActionMock, add the InputMarker to that Action entity.
+pub(crate) fn add_input_marker_from_authority<C: Component>(
+    trigger: On<Add, HasAuthority>,
+    action: Query<(), (With<ActionOf<C>>, Or<(With<Bindings>, With<ActionMock>)>)>,
+    mut commands: Commands,
+) {
+    if action.get(trigger.entity).is_ok() {
+        commands
+            .entity(trigger.entity)
+            .insert(InputMarker::<C>::default());
+    }
+}

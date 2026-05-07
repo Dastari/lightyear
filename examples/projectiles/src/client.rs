@@ -142,9 +142,9 @@ fn add_actions(commands: &mut Commands, player: Entity) {
     commands.spawn((
         ActionOf::<PlayerContext>::new(player),
         Action::<MoveCursor>::new(),
-        // we use a mock to manually set the ActionState and ActionValue from the mouse position
+        // we use a mock to manually set the TriggerState and ActionValue from the mouse position
         ActionMock::new(
-            ActionState::Fired,
+            TriggerState::Fired,
             ActionValue::zero(ActionValueDim::Axis2D),
             MockSpan::Manual,
         ),

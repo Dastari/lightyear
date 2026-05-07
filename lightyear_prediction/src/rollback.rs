@@ -423,22 +423,21 @@ fn check_rollback(
                 }
             }
             // Rollback from any mismatched input
-            RollbackMode::Check => {
-                if prediction_manager.earliest_mismatch_input.has_mismatches() {
-                    // we rollback to the tick right before the mismatch
-                    let rollback_tick = prediction_manager.earliest_mismatch_input.tick.get() - 1;
-                    debug!(
-                        ?rollback_tick,
-                        "Rollback because we have received a remote input that doesn't match our input buffer history"
-                    );
-                    do_rollback(
-                        rollback_tick,
-                        &prediction_manager,
-                        &mut commands,
-                        Rollback::FromInputs,
-                    );
-                }
+            RollbackMode::Check if prediction_manager.earliest_mismatch_input.has_mismatches() => {
+                // we rollback to the tick right before the mismatch
+                let rollback_tick = prediction_manager.earliest_mismatch_input.tick.get() - 1;
+                debug!(
+                    ?rollback_tick,
+                    "Rollback because we have received a remote input that doesn't match our input buffer history"
+                );
+                do_rollback(
+                    rollback_tick,
+                    &prediction_manager,
+                    &mut commands,
+                    Rollback::FromInputs,
+                );
             }
+            RollbackMode::Check => {}
             _ => {}
         }
     }

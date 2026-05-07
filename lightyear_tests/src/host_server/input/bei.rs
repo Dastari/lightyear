@@ -1,7 +1,8 @@
 use crate::protocol::{BEIAction1, BEIContext};
 use crate::stepper::*;
 use bevy::prelude::*;
-use bevy_enhanced_input::action::{Action, ActionMock, ActionState, MockSpan};
+use bevy_enhanced_input::action::mock::{ActionMock, MockSpan};
+use bevy_enhanced_input::action::{Action, TriggerState};
 use bevy_enhanced_input::prelude::{ActionOf, ActionValue, Actions};
 use lightyear::input::bei::input_message::BEIBuffer;
 use lightyear::prelude::input::bei::InputMarker;
@@ -52,7 +53,7 @@ fn test_rebroadcast() {
             ActionOf::<BEIContext>::new(client1_entity),
             Action::<BEIAction1>::default(),
             ActionMock::new(
-                ActionState::Fired,
+                TriggerState::Fired,
                 ActionValue::Bool(true),
                 MockSpan::Manual,
             ),

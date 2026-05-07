@@ -663,9 +663,11 @@ fn build_sections(
     layout: &MetricsPanelLayout,
     settings: &MetricsPanelSettings,
 ) {
-    let mut section_id: u32 = 1;
     let mut subsection_id: u32 = 1000;
-    for section in &layout.sections {
+    for (section_id, section) in (1_u32..).zip(layout.sections.iter()) {
+        let subsection_start = subsection_id;
+        subsection_id += section.subsections.len() as u32;
+
         // Section header button
         cmd.spawn((
             SectionHeader { id: section_id },
@@ -698,7 +700,8 @@ fn build_sections(
             BackgroundColor(Color::srgba(0.12, 0.12, 0.12, settings.alpha)),
         ))
         .with_children(|cmd| {
-            for subsection in &section.subsections {
+            for (subsection_id, subsection) in (subsection_start..).zip(section.subsections.iter())
+            {
                 // Subsection header
                 cmd.spawn((
                     SubsectionHeader { id: subsection_id },
@@ -734,10 +737,8 @@ fn build_sections(
                         line(cmd, spec, settings);
                     }
                 });
-                subsection_id += 1;
             }
         });
-        section_id += 1;
     }
 }
 
