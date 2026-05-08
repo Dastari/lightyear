@@ -4,6 +4,8 @@ pub(crate) mod buffer;
 
 pub mod components;
 
+pub mod metrics;
+
 pub mod plugin;
 
 pub mod sender;

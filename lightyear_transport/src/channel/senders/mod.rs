@@ -27,6 +27,9 @@ pub trait ChannelSend {
     /// Bookkeeping for the channel
     fn update(&mut self, real_time: &Time<Real>, link_stats: &LinkStats);
 
+    /// Number of outbound messages currently retained by this channel sender.
+    fn queued_message_count(&self) -> usize;
+
     /// Queues a message to be transmitted.
     /// The priority of the message needs to be specified
     ///

@@ -66,6 +66,10 @@ pub mod prelude {
         AppComponentExt, ComponentRegistration, ComponentRegistry, TransformLinearInterpolation,
     };
     pub use crate::send::components::*;
+    pub use crate::send::metrics::{
+        ReplicationSendChannel, ReplicationSendMetrics, ReplicationSendMetricsObserver,
+        ReplicationSendMetricsSink, ReplicationSendStatus,
+    };
     pub use crate::send::plugin::{ReplicationBufferSystems, ReplicationSendPlugin};
     pub use crate::send::sender::{ReplicationSender, SendUpdatesMode};
     pub use crate::visibility::immediate::{NetworkVisibility, NetworkVisibilityPlugin};

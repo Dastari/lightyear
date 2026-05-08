@@ -11,6 +11,7 @@ use crate::prespawn::PreSpawned;
 use crate::registry::registry::ComponentRegistry;
 use crate::send::buffer;
 use crate::send::components::{Replicate, Replicating, ReplicationGroup};
+use crate::send::metrics::ReplicationSendMetricsObserver;
 use crate::send::sender::ReplicationSender;
 use bevy_app::{App, Plugin, PostUpdate};
 use bevy_ecs::entity::EntityIndexSet;
@@ -85,9 +86,10 @@ impl ReplicationSendPlugin {
         timeline: Res<LocalTimeline>,
         message_registry: Res<MessageRegistry>,
         change_tick: SystemChangeTick,
+        metrics_observer: Option<Res<ReplicationSendMetricsObserver>>,
         // We send messages directly through the transport instead of MessageSender<EntityActionsMessage>
         // but I don't remember why
-        mut query: Query<(&mut ReplicationSender, &mut Transport), With<Connected>>,
+        mut query: Query<(Entity, &mut ReplicationSender, &mut Transport), With<Connected>>,
     ) {
         #[cfg(feature = "metrics")]
         let _timer = DormantTimerGauge::new("replication/send");
@@ -103,7 +105,7 @@ impl ReplicationSendPlugin {
             .unwrap();
         query
             .par_iter_mut()
-            .for_each(|(mut sender, mut transport)| {
+            .for_each(|(sender_entity, mut sender, mut transport)| {
                 if !sender.send_timer.is_finished() {
                     return;
                 }
@@ -116,19 +118,23 @@ impl ReplicationSendPlugin {
                 sender.accumulate_priority(&time);
                 sender
                     .send_actions_messages(
+                        sender_entity,
                         timeline.tick(),
                         bevy_tick,
                         &mut transport,
                         actions_net_id,
+                        metrics_observer.as_deref(),
                     )
                     .inspect_err(|e| error!("Error buffering ActionsMessage: {e:?}"))
                     .ok();
                 sender
                     .send_updates_messages(
+                        sender_entity,
                         timeline.tick(),
                         bevy_tick,
                         &mut transport,
                         updates_net_id,
+                        metrics_observer.as_deref(),
                     )
                     .inspect_err(|e| error!("Error buffering UpdatesMessage: {e:?}"))
                     .ok();
@@ -138,20 +144,20 @@ impl ReplicationSendPlugin {
     /// Check which replication messages were actually sent, and update the
     /// priority accordingly
     fn update_priority(
-        mut query: Query<(&mut ReplicationSender, &mut Transport), With<Connected>>,
+        metrics_observer: Option<Res<ReplicationSendMetricsObserver>>,
+        mut query: Query<(Entity, &mut ReplicationSender, &mut Transport), With<Connected>>,
     ) {
         query
             .par_iter_mut()
-            .for_each(|(mut sender, mut transport)| {
+            .for_each(|(sender_entity, mut sender, mut transport)| {
                 if !sender.send_timer.is_finished() {
                     return;
                 }
-                let messages_sent = &mut transport
-                    .senders
-                    .get_mut(&ChannelKind::of::<UpdatesChannel>())
-                    .unwrap()
-                    .messages_sent;
-                sender.recv_send_notification(messages_sent);
+                sender.recv_send_notification(
+                    sender_entity,
+                    &mut transport,
+                    metrics_observer.as_deref(),
+                );
             });
     }
 

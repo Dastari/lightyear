@@ -182,6 +182,12 @@ impl Default for EntityActions {
     }
 }
 
+impl EntityActions {
+    pub(crate) fn component_count(&self) -> usize {
+        self.insert.len() + self.remove.len() + self.updates.len()
+    }
+}
+
 /// Helps us build replication messages while avoiding intermediary allocations.
 ///
 /// Instead of storing an intermediate Vec or HashMap containing the serialized updates,

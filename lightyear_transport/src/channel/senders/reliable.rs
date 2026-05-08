@@ -108,6 +108,10 @@ impl ChannelSend for ReliableSender {
         }
     }
 
+    fn queued_message_count(&self) -> usize {
+        self.unacked_messages.len()
+    }
+
     /// Add a new message to the buffer of messages to be sent.
     /// This is a client-facing function, to be called when you want to send a message
     fn buffer_send(&mut self, message: Bytes, priority: f32) -> Option<MessageId> {

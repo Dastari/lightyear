@@ -237,6 +237,18 @@ impl Transport {
         Ok(message_id)
     }
 
+    pub fn sender_queue_depth<C: Channel>(&self) -> Result<usize, TransportError> {
+        self.sender_queue_depth_erased(ChannelKind::of::<C>())
+    }
+
+    pub fn sender_queue_depth_erased(&self, kind: ChannelKind) -> Result<usize, TransportError> {
+        let sender_metadata = self
+            .senders
+            .get(&kind)
+            .ok_or(TransportError::ChannelNotFound(kind))?;
+        Ok(sender_metadata.sender.queued_message_count())
+    }
+
     /// Reset the Transport to a default state upon disconnection
     pub(crate) fn reset(&mut self, registry: &ChannelRegistry) {
         self.receivers.iter_mut().for_each(|(channel_id, r)| {

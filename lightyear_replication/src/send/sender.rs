@@ -5,6 +5,10 @@ use crate::prespawn::PreSpawned;
 use crate::registry::registry::ComponentRegistry;
 use crate::registry::{ComponentError, ComponentKind, ComponentNetId};
 use crate::send::components::ReplicationGroupId;
+use crate::send::metrics::{
+    ReplicationSendChannel, ReplicationSendMetrics, ReplicationSendMetricsObserver,
+    ReplicationSendStatus,
+};
 use alloc::{string::ToString, vec::Vec};
 use bevy_ecs::{
     change_detection::Tick as BevyTick,
@@ -22,6 +26,7 @@ use lightyear_messages::MessageNetId;
 use lightyear_serde::ToBytes;
 use lightyear_serde::entity_map::{RemoteEntityMap, SendEntityMap};
 use lightyear_serde::writer::Writer;
+use lightyear_transport::channel::registry::ChannelKind;
 use lightyear_transport::packet::message::MessageId;
 use lightyear_transport::prelude::Transport;
 #[cfg(feature = "trace")]
@@ -64,6 +69,7 @@ pub struct ReplicationSender {
     /// when we buffered the message. (so that when it's acked, we know we only need to include updates that happened after that tick,
     /// for that replication group)
     pub(crate) updates_message_id_to_group_id: HashMap<MessageId, UpdateMessageMetadata>,
+    pub(crate) actions_message_id_to_metrics: HashMap<MessageId, ReplicationMessageMetrics>,
     /// Group channels that have at least 1 replication update or action buffered
     pub group_with_actions: EntityHashSet<ReplicationGroupId>,
     pub group_with_updates: EntityHashSet<ReplicationGroupId>,
@@ -103,6 +109,7 @@ impl ReplicationSender {
             pending_despawns: Vec::default(),
             writer: Writer::default(),
             updates_message_id_to_group_id: Default::default(),
+            actions_message_id_to_metrics: Default::default(),
             group_with_actions: EntityHashSet::default(),
             group_with_updates: EntityHashSet::default(),
             // pending_unique_components: EntityHashMap::default(),
@@ -214,15 +221,75 @@ impl ReplicationSender {
     ///
     /// This should be call after the Send SystemSet.
     #[cfg_attr(feature = "trace", instrument(level = Level::INFO, skip_all))]
-    pub(crate) fn recv_send_notification(&mut self, messages_sent: &mut Vec<MessageId>) {
+    pub(crate) fn recv_send_notification(
+        &mut self,
+        sender_entity: Entity,
+        transport: &mut Transport,
+        metrics_observer: Option<&ReplicationSendMetricsObserver>,
+    ) {
         if !self.bandwidth_cap_enabled {
             return;
         }
+        self.recv_actions_send_notification(sender_entity, transport, metrics_observer);
+        self.recv_updates_send_notification(sender_entity, transport, metrics_observer);
+    }
+
+    fn recv_actions_send_notification(
+        &mut self,
+        sender_entity: Entity,
+        transport: &mut Transport,
+        metrics_observer: Option<&ReplicationSendMetricsObserver>,
+    ) {
+        let queue_depth = transport
+            .sender_queue_depth::<ActionsChannel>()
+            .unwrap_or_default();
+        let Some(sender_metadata) = transport
+            .senders
+            .get_mut(&ChannelKind::of::<ActionsChannel>())
+        else {
+            return;
+        };
+        let messages_sent = &mut sender_metadata.messages_sent;
+        messages_sent.drain(..).for_each(|message_id| {
+            if let Some(metrics) = self.actions_message_id_to_metrics.remove(&message_id) {
+                observe_replication_send_metrics(
+                    metrics_observer,
+                    metrics,
+                    ReplicationSendMetricContext {
+                        sender_entity,
+                        channel: ReplicationSendChannel::Actions,
+                        status: ReplicationSendStatus::Sent,
+                        message_id: Some(message_id),
+                        queue_depth,
+                        bandwidth_limited: true,
+                    },
+                );
+            }
+        });
+    }
+
+    fn recv_updates_send_notification(
+        &mut self,
+        sender_entity: Entity,
+        transport: &mut Transport,
+        metrics_observer: Option<&ReplicationSendMetricsObserver>,
+    ) {
+        let queue_depth = transport
+            .sender_queue_depth::<UpdatesChannel>()
+            .unwrap_or_default();
+        let Some(sender_metadata) = transport
+            .senders
+            .get_mut(&ChannelKind::of::<UpdatesChannel>())
+        else {
+            return;
+        };
+        let messages_sent = &mut sender_metadata.messages_sent;
         messages_sent.drain(..).for_each(|message_id| {
             match self.updates_message_id_to_group_id.get(&message_id)
             { Some(UpdateMessageMetadata {
                 group_id,
                 bevy_tick,
+                metrics,
                 ..
             }) => {
                 match self.group_channels.get_mut(group_id) { Some(channel) => {
@@ -235,6 +302,18 @@ impl ReplicationSender {
                     );
                     channel.send_tick = Some(*bevy_tick);
                     channel.accumulated_priority = 0.0;
+                    observe_replication_send_metrics(
+                        metrics_observer,
+                        *metrics,
+                        ReplicationSendMetricContext {
+                            sender_entity,
+                            channel: ReplicationSendChannel::Updates,
+                            status: ReplicationSendStatus::Sent,
+                            message_id: Some(message_id),
+                            queue_depth,
+                            bandwidth_limited: true,
+                        },
+                    );
                 } _ => {
                     error!(?message_id, ?group_id, "Received a send message-id notification but the corresponding group channel does not exist");
                 }}
@@ -268,6 +347,7 @@ impl ReplicationSender {
                 bevy_tick,
                 tick,
                 delta,
+                ..
             }) => {
                 match self.group_channels.get_mut(&group_id) { Some(channel) => {
                     // update the ack tick for the channel
@@ -574,12 +654,16 @@ impl ReplicationSender {
     #[cfg_attr(feature = "trace", instrument(level = Level::INFO, skip_all))]
     pub(crate) fn send_actions_messages(
         &mut self,
+        sender_entity: Entity,
         tick: Tick,
         bevy_tick: BevyTick,
-        sender: &mut Transport,
+        transport: &mut Transport,
         actions_net_id: MessageNetId,
+        metrics_observer: Option<&ReplicationSendMetricsObserver>,
     ) -> Result<(), ReplicationError> {
-        self.group_with_actions.drain().try_for_each(|group_id| {
+        let group_ids: Vec<_> = self.group_with_actions.drain().collect();
+        let mut action_metrics = Vec::new();
+        let result = group_ids.into_iter().try_for_each(|group_id| {
             // SAFETY: we know that the group_channel exists since group_with_actions contains the group_id
             let channel = self.group_channels.get_mut(&group_id).unwrap();
 
@@ -637,16 +721,41 @@ impl ReplicationSender {
                 &mut self.writer,
             )?);
             channel.actions_next_send_message_id += 1;
+            let mut component_count = 0;
             for (entity, actions) in channel.pending_actions.drain() {
                 trace!("Actions to send for entity {:?}: {:?}", entity, actions);
                 // SAFETY: we always re-create the builder after taking it
                 if !unsafe { builder.as_ref().unwrap_unchecked() }.can_add_data(entity, &actions) {
                     // we cannot fit the entity/action into this message, so we sent it now
                     let current_builder = unsafe { builder.take().unwrap_unchecked() };
+                    let entity_count = current_builder.entity_count as usize;
                     let message_bytes = current_builder.build()?;
-                    let message_id = sender
+                    let byte_count = message_bytes.len();
+                    let message_id = transport
                         .send_mut_with_priority::<ActionsChannel>(message_bytes, priority)?
                         .expect("The entity actions channels should always return a message_id");
+                    let queue_depth = transport
+                        .sender_queue_depth::<ActionsChannel>()
+                        .unwrap_or_default();
+                    let metrics = ReplicationMessageMetrics {
+                        tick,
+                        group_id,
+                        bytes: byte_count,
+                        entity_count,
+                        component_count,
+                    };
+                    observe_queued_replication_message(
+                        metrics_observer,
+                        self.bandwidth_cap_enabled,
+                        sender_entity,
+                        ReplicationSendChannel::Actions,
+                        Some(message_id),
+                        queue_depth,
+                        metrics,
+                    );
+                    if self.bandwidth_cap_enabled && metrics_observer.is_some() {
+                        action_metrics.push((message_id, metrics));
+                    }
                     trace!(
                         ?message_id,
                         ?group_id,
@@ -664,17 +773,43 @@ impl ReplicationSender {
                         &mut self.writer,
                     )?);
                     channel.actions_next_send_message_id += 1;
+                    component_count = 0;
                 }
 
+                component_count += actions.component_count();
                 unsafe { builder.as_mut().unwrap_unchecked() }.add_data(entity, actions)?;
             }
             // flush if we have any entities left
             let builder = unsafe { builder.unwrap_unchecked() };
             if builder.entity_count > 0 {
+                let entity_count = builder.entity_count as usize;
                 let message_bytes = builder.build()?;
-                let message_id = sender
+                let byte_count = message_bytes.len();
+                let message_id = transport
                     .send_mut_with_priority::<ActionsChannel>(message_bytes, priority)?
                     .expect("The entity actions channels should always return a message_id");
+                let queue_depth = transport
+                    .sender_queue_depth::<ActionsChannel>()
+                    .unwrap_or_default();
+                let metrics = ReplicationMessageMetrics {
+                    tick,
+                    group_id,
+                    bytes: byte_count,
+                    entity_count,
+                    component_count,
+                };
+                observe_queued_replication_message(
+                    metrics_observer,
+                    self.bandwidth_cap_enabled,
+                    sender_entity,
+                    ReplicationSendChannel::Actions,
+                    Some(message_id),
+                    queue_depth,
+                    metrics,
+                );
+                if self.bandwidth_cap_enabled && metrics_observer.is_some() {
+                    action_metrics.push((message_id, metrics));
+                }
                 trace!(
                     ?message_id,
                     ?group_id,
@@ -690,19 +825,24 @@ impl ReplicationSender {
             // TODO: update bandwidth cap
             channel.last_action_tick = Some(tick);
             Ok::<(), ReplicationError>(())
-        })
+        });
+        self.actions_message_id_to_metrics.extend(action_metrics);
+        result
     }
 
     /// Buffer the [`UpdatesMessage`](crate::message::UpdatesMessage) to send in the [`Transport`]
     #[cfg_attr(feature = "trace", instrument(level = Level::INFO, skip_all))]
     pub(crate) fn send_updates_messages(
         &mut self,
+        sender_entity: Entity,
         tick: Tick,
         bevy_tick: BevyTick,
         transport: &mut Transport,
         updates_net_id: MessageNetId,
+        metrics_observer: Option<&ReplicationSendMetricsObserver>,
     ) -> Result<(), ReplicationError> {
-        self.group_with_updates.drain().try_for_each(|group_id| {
+        let group_ids: Vec<_> = self.group_with_updates.drain().collect();
+        group_ids.into_iter().try_for_each(|group_id| {
             let channel = self.group_channels.get_mut(&group_id).unwrap();
             trace!(?group_id, "pending updates: {:?}", channel.pending_updates);
             let priority = channel.accumulated_priority;
@@ -720,15 +860,37 @@ impl ReplicationSender {
                 group_id,
                 &mut self.writer,
             )?);
+            let mut component_count = 0;
             for (entity, updates) in channel.pending_updates.drain() {
                 // SAFETY: builder is always Some at the start of an iteration
                 if !unsafe { builder.as_ref().unwrap_unchecked() }.can_add_data(entity, &updates) {
                     // can't add any more data in this message: send message and re-create the builder
                     let current_builder = builder.take().unwrap();
+                    let entity_count = current_builder.entity_count as usize;
                     let message_bytes = current_builder.build()?;
+                    let byte_count = message_bytes.len();
                     let message_id = transport
                         .send_mut_with_priority::<UpdatesChannel>(message_bytes, priority)?
                         .expect("The entity updates channels should always return a message_id");
+                    let queue_depth = transport
+                        .sender_queue_depth::<UpdatesChannel>()
+                        .unwrap_or_default();
+                    let metrics = ReplicationMessageMetrics {
+                        tick,
+                        group_id,
+                        bytes: byte_count,
+                        entity_count,
+                        component_count,
+                    };
+                    observe_queued_replication_message(
+                        metrics_observer,
+                        self.bandwidth_cap_enabled,
+                        sender_entity,
+                        ReplicationSendChannel::Updates,
+                        Some(message_id),
+                        queue_depth,
+                        metrics,
+                    );
                     // keep track of the message_id -> group mapping, so we can handle receiving an ACK for that message_id later
                     self.updates_message_id_to_group_id.insert(
                         message_id,
@@ -737,6 +899,7 @@ impl ReplicationSender {
                             bevy_tick,
                             tick,
                             delta: core::mem::take(&mut channel.pending_delta_updates),
+                            metrics,
                         },
                     );
                     trace!(
@@ -754,18 +917,41 @@ impl ReplicationSender {
                         group_id,
                         &mut self.writer,
                     )?);
+                    component_count = 0;
                 }
                 // SAFETY: builder is always Some at this point, since we re-create it
+                component_count += updates.len();
                 unsafe { builder.as_mut().unwrap_unchecked() }.add_data(entity, updates)?;
             }
 
             // flush if we have any entities left
             let builder = unsafe { builder.unwrap_unchecked() };
             if builder.entity_count > 0 {
+                let entity_count = builder.entity_count as usize;
                 let message_bytes = builder.build()?;
+                let byte_count = message_bytes.len();
                 let message_id = transport
                     .send_mut_with_priority::<UpdatesChannel>(message_bytes, priority)?
                     .expect("The entity updates channels should always return a message_id");
+                let queue_depth = transport
+                    .sender_queue_depth::<UpdatesChannel>()
+                    .unwrap_or_default();
+                let metrics = ReplicationMessageMetrics {
+                    tick,
+                    group_id,
+                    bytes: byte_count,
+                    entity_count,
+                    component_count,
+                };
+                observe_queued_replication_message(
+                    metrics_observer,
+                    self.bandwidth_cap_enabled,
+                    sender_entity,
+                    ReplicationSendChannel::Updates,
+                    Some(message_id),
+                    queue_depth,
+                    metrics,
+                );
                 self.updates_message_id_to_group_id.insert(
                     message_id,
                     UpdateMessageMetadata {
@@ -773,6 +959,7 @@ impl ReplicationSender {
                         bevy_tick,
                         tick,
                         delta: core::mem::take(&mut channel.pending_delta_updates),
+                        metrics,
                     },
                 );
                 trace!(
@@ -814,6 +1001,86 @@ pub(crate) struct UpdateMessageMetadata {
     tick: Tick,
     /// The (entity, component) pairs that were included in the message
     delta: Vec<(Entity, ComponentKind)>,
+    metrics: ReplicationMessageMetrics,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReplicationMessageMetrics {
+    tick: Tick,
+    group_id: ReplicationGroupId,
+    bytes: usize,
+    entity_count: usize,
+    component_count: usize,
+}
+
+struct ReplicationSendMetricContext {
+    sender_entity: Entity,
+    channel: ReplicationSendChannel,
+    status: ReplicationSendStatus,
+    message_id: Option<MessageId>,
+    queue_depth: usize,
+    bandwidth_limited: bool,
+}
+
+fn observe_replication_send_metrics(
+    observer: Option<&ReplicationSendMetricsObserver>,
+    metrics: ReplicationMessageMetrics,
+    context: ReplicationSendMetricContext,
+) {
+    let Some(observer) = observer else {
+        return;
+    };
+    observer.observe(ReplicationSendMetrics {
+        sender_entity: context.sender_entity,
+        tick: metrics.tick,
+        group_id: metrics.group_id,
+        channel: context.channel,
+        status: context.status,
+        message_id: context.message_id,
+        bytes: metrics.bytes,
+        message_count: 1,
+        entity_count: metrics.entity_count,
+        component_count: metrics.component_count,
+        queue_depth: context.queue_depth,
+        bandwidth_limited: context.bandwidth_limited,
+    });
+}
+
+fn observe_queued_replication_message(
+    observer: Option<&ReplicationSendMetricsObserver>,
+    bandwidth_limited: bool,
+    sender_entity: Entity,
+    channel: ReplicationSendChannel,
+    message_id: Option<MessageId>,
+    queue_depth: usize,
+    metrics: ReplicationMessageMetrics,
+) {
+    observe_replication_send_metrics(
+        observer,
+        metrics,
+        ReplicationSendMetricContext {
+            sender_entity,
+            channel,
+            status: ReplicationSendStatus::Queued,
+            message_id,
+            queue_depth,
+            bandwidth_limited,
+        },
+    );
+    if !bandwidth_limited {
+        observe_replication_send_metrics(
+            observer,
+            metrics,
+            ReplicationSendMetricContext {
+                sender_entity,
+                channel,
+                status: ReplicationSendStatus::Sent,
+                message_id,
+                queue_depth,
+                bandwidth_limited: false,
+            },
+        );
+    }
 }
 
 /// Channel to keep track of sending replication messages for a given Group
@@ -889,8 +1156,10 @@ impl Default for GroupChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::send::metrics::ReplicationSendMetricsSink;
     use alloc::vec;
     use lightyear_transport::prelude::{ChannelMode, ChannelRegistry, ChannelSettings};
+    use std::sync::{Arc, Mutex};
 
     #[cfg(feature = "std")]
     use test_log::test;
@@ -911,6 +1180,23 @@ mod tests {
         let sender =
             ReplicationSender::new(Duration::default(), SendUpdatesMode::SinceLastSend, false);
         (sender, transport)
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingSink {
+        metrics: Arc<Mutex<Vec<ReplicationSendMetrics>>>,
+    }
+
+    impl ReplicationSendMetricsSink for RecordingSink {
+        fn observe(&self, metrics: ReplicationSendMetrics) {
+            self.metrics.lock().unwrap().push(metrics);
+        }
+    }
+
+    impl RecordingSink {
+        fn observer(&self) -> ReplicationSendMetricsObserver {
+            ReplicationSendMetricsObserver::new(self.clone())
+        }
     }
 
     /// Test that in mode SinceLastSend, the `send_tick` is updated correctly:
@@ -939,37 +1225,49 @@ mod tests {
         // when we buffer a message to be sent, we update the `send_tick`
         sender.prepare_component_update(entity, group_1, Bytes::new());
         sender
-            .send_updates_messages(tick_1, bevy_tick_1, &mut transport, MessageNetId::default())
+            .send_updates_messages(
+                Entity::PLACEHOLDER,
+                tick_1,
+                bevy_tick_1,
+                &mut transport,
+                MessageNetId::default(),
+                None,
+            )
             .unwrap();
 
         let group = sender.group_channels.get(&group_1).unwrap();
-        assert_eq!(
-            sender.updates_message_id_to_group_id.get(&message_1),
-            Some(&UpdateMessageMetadata {
-                group_id: group_1,
-                bevy_tick: bevy_tick_1,
-                tick: tick_1,
-                delta: vec![],
-            })
-        );
+        let metadata = sender
+            .updates_message_id_to_group_id
+            .get(&message_1)
+            .unwrap();
+        assert_eq!(metadata.group_id, group_1);
+        assert_eq!(metadata.bevy_tick, bevy_tick_1);
+        assert_eq!(metadata.tick, tick_1);
+        assert_eq!(metadata.delta, vec![]);
         assert_eq!(group.send_tick, Some(bevy_tick_1));
         assert_eq!(group.ack_bevy_tick, None);
 
         // if we buffer a second message, we update the `send_tick`
         sender.prepare_component_update(entity, group_1, Bytes::new());
         sender
-            .send_updates_messages(tick_2, bevy_tick_2, &mut transport, MessageNetId::default())
+            .send_updates_messages(
+                Entity::PLACEHOLDER,
+                tick_2,
+                bevy_tick_2,
+                &mut transport,
+                MessageNetId::default(),
+                None,
+            )
             .unwrap();
         let group = sender.group_channels.get(&group_1).unwrap();
-        assert_eq!(
-            sender.updates_message_id_to_group_id.get(&message_2),
-            Some(&UpdateMessageMetadata {
-                group_id: group_1,
-                bevy_tick: bevy_tick_2,
-                tick: tick_2,
-                delta: vec![],
-            })
-        );
+        let metadata = sender
+            .updates_message_id_to_group_id
+            .get(&message_2)
+            .unwrap();
+        assert_eq!(metadata.group_id, group_1);
+        assert_eq!(metadata.bevy_tick, bevy_tick_2);
+        assert_eq!(metadata.tick, tick_2);
+        assert_eq!(metadata.delta, vec![]);
         assert_eq!(group.send_tick, Some(bevy_tick_2));
         assert_eq!(group.ack_bevy_tick, None);
 
@@ -993,18 +1291,24 @@ mod tests {
         // if we buffer a third message, we update the `send_tick`
         sender.prepare_component_update(entity, group_1, Bytes::new());
         sender
-            .send_updates_messages(tick_3, bevy_tick_3, &mut transport, MessageNetId::default())
+            .send_updates_messages(
+                Entity::PLACEHOLDER,
+                tick_3,
+                bevy_tick_3,
+                &mut transport,
+                MessageNetId::default(),
+                None,
+            )
             .unwrap();
         let group = sender.group_channels.get(&group_1).unwrap();
-        assert_eq!(
-            sender.updates_message_id_to_group_id.get(&message_3),
-            Some(&UpdateMessageMetadata {
-                group_id: group_1,
-                bevy_tick: bevy_tick_3,
-                tick: tick_3,
-                delta: vec![],
-            })
-        );
+        let metadata = sender
+            .updates_message_id_to_group_id
+            .get(&message_3)
+            .unwrap();
+        assert_eq!(metadata.group_id, group_1);
+        assert_eq!(metadata.bevy_tick, bevy_tick_3);
+        assert_eq!(metadata.tick, tick_3);
+        assert_eq!(metadata.delta, vec![]);
         assert_eq!(group.send_tick, Some(bevy_tick_3));
         assert_eq!(group.ack_bevy_tick, Some(bevy_tick_2));
 
@@ -1047,25 +1351,121 @@ mod tests {
         // (because we wait until the message is actually send)
         sender.prepare_component_update(entity, group_1, Bytes::new());
         sender
-            .send_updates_messages(tick_1, bevy_tick_1, &mut transport, MessageNetId::default())
+            .send_updates_messages(
+                Entity::PLACEHOLDER,
+                tick_1,
+                bevy_tick_1,
+                &mut transport,
+                MessageNetId::default(),
+                None,
+            )
             .unwrap();
         let group = sender.group_channels.get(&group_1).unwrap();
-        assert_eq!(
-            sender.updates_message_id_to_group_id.get(&message_1),
-            Some(&UpdateMessageMetadata {
-                group_id: group_1,
-                bevy_tick: bevy_tick_1,
-                tick: tick_1,
-                delta: vec![],
-            })
-        );
+        let metadata = sender
+            .updates_message_id_to_group_id
+            .get(&message_1)
+            .unwrap();
+        assert_eq!(metadata.group_id, group_1);
+        assert_eq!(metadata.bevy_tick, bevy_tick_1);
+        assert_eq!(metadata.tick, tick_1);
+        assert_eq!(metadata.delta, vec![]);
         assert_eq!(group.send_tick, None);
         assert_eq!(group.ack_bevy_tick, None);
 
         // when the message is actually sent, we update the `send_tick`
-        sender.recv_send_notification(&mut vec![message_1]);
+        transport
+            .senders
+            .get_mut(&ChannelKind::of::<UpdatesChannel>())
+            .unwrap()
+            .messages_sent
+            .push(message_1);
+        sender.recv_send_notification(Entity::PLACEHOLDER, &mut transport, None);
         let group = sender.group_channels.get(&group_1).unwrap();
         assert_eq!(group.send_tick, Some(bevy_tick_1));
         assert_eq!(group.ack_bevy_tick, None);
+    }
+
+    #[test]
+    fn test_replication_send_metrics_observer_records_update_bytes() {
+        let (mut sender, mut transport) = setup();
+        let sink = RecordingSink::default();
+        let observer = sink.observer();
+
+        let entity = Entity::from_bits(1);
+        let group = ReplicationGroupId(0);
+        let tick = Tick(7);
+        let bevy_tick = BevyTick::new(7);
+        sender.group_channels.insert(group, GroupChannel::default());
+
+        sender.prepare_component_update(entity, group, Bytes::from_static(&[1, 2, 3]));
+        sender
+            .send_updates_messages(
+                Entity::PLACEHOLDER,
+                tick,
+                bevy_tick,
+                &mut transport,
+                MessageNetId::default(),
+                Some(&observer),
+            )
+            .unwrap();
+
+        let metrics = sink.metrics.lock().unwrap();
+        assert_eq!(metrics.len(), 2);
+        assert_eq!(metrics[0].status, ReplicationSendStatus::Queued);
+        assert_eq!(metrics[1].status, ReplicationSendStatus::Sent);
+        for metric in metrics.iter() {
+            assert_eq!(metric.channel, ReplicationSendChannel::Updates);
+            assert_eq!(metric.group_id, group);
+            assert_eq!(metric.tick, tick);
+            assert_eq!(metric.message_count, 1);
+            assert_eq!(metric.entity_count, 1);
+            assert_eq!(metric.component_count, 1);
+            assert!(metric.bytes > 0);
+            assert_eq!(metric.queue_depth, 1);
+            assert!(!metric.bandwidth_limited);
+        }
+    }
+
+    #[test]
+    fn test_replication_send_metrics_observer_records_bandwidth_limited_sent_updates() {
+        let (mut sender, mut transport) = setup();
+        sender.bandwidth_cap_enabled = true;
+        let sink = RecordingSink::default();
+        let observer = sink.observer();
+
+        let entity = Entity::from_bits(1);
+        let group = ReplicationGroupId(0);
+        let tick = Tick(7);
+        let bevy_tick = BevyTick::new(7);
+        let message_id = MessageId(0);
+        sender.group_channels.insert(group, GroupChannel::default());
+
+        sender.prepare_component_update(entity, group, Bytes::from_static(&[1, 2, 3]));
+        sender
+            .send_updates_messages(
+                Entity::PLACEHOLDER,
+                tick,
+                bevy_tick,
+                &mut transport,
+                MessageNetId::default(),
+                Some(&observer),
+            )
+            .unwrap();
+        assert_eq!(sink.metrics.lock().unwrap().len(), 1);
+
+        transport
+            .senders
+            .get_mut(&ChannelKind::of::<UpdatesChannel>())
+            .unwrap()
+            .messages_sent
+            .push(message_id);
+        sender.recv_send_notification(Entity::PLACEHOLDER, &mut transport, Some(&observer));
+
+        let metrics = sink.metrics.lock().unwrap();
+        assert_eq!(metrics.len(), 2);
+        assert_eq!(metrics[0].status, ReplicationSendStatus::Queued);
+        assert_eq!(metrics[1].status, ReplicationSendStatus::Sent);
+        assert!(metrics.iter().all(|m| m.bandwidth_limited));
+        assert_eq!(metrics[1].message_id, Some(message_id));
     }
 }
