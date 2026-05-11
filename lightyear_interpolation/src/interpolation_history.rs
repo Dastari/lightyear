@@ -205,74 +205,15 @@ mod tests {
     #[derive(Component, Clone, PartialEq, Debug)]
     struct TestComp(f32);
 
-    fn lerp_test_comp(start: TestComp, end: TestComp, t: f32) -> TestComp {
+    fn lerp(start: TestComp, end: TestComp, t: f32) -> TestComp {
         TestComp(start.0 + (end.0 - start.0) * t)
     }
 
     fn registry() -> InterpolationRegistry {
         let mut registry = InterpolationRegistry::default();
-        registry.set_interpolation::<TestComp>(lerp_test_comp);
+        registry.set_interpolation::<TestComp>(lerp);
         registry
     }
-
-    #[test]
-    fn interpolate_blends_between_two_keyframes() {
-        let registry = registry();
-        let mut history = ConfirmedHistory::<TestComp>::default();
-        history.push(Tick(10), TestComp(0.0));
-        history.push(Tick(20), TestComp(10.0));
-
-        assert_eq!(
-            history.interpolate(Tick(15), 0.0, &registry),
-            Some(TestComp(5.0))
-        );
-    }
-
-    #[test]
-    fn interpolate_clamps_when_past_end_tick() {
-        let registry = registry();
-        let mut history = ConfirmedHistory::<TestComp>::default();
-        history.push(Tick(10), TestComp(0.0));
-        history.push(Tick(20), TestComp(10.0));
-
-        assert_eq!(
-            history.interpolate(Tick(30), 0.0, &registry),
-            Some(TestComp(10.0))
-        );
-        assert_eq!(
-            history.interpolate(Tick(20), 0.5, &registry),
-            Some(TestComp(10.0))
-        );
-    }
-
-    #[test]
-    fn interpolate_returns_none_with_single_keyframe() {
-        let registry = registry();
-        let mut history = ConfirmedHistory::<TestComp>::default();
-        history.push(Tick(10), TestComp(42.0));
-
-        assert_eq!(history.interpolate(Tick(10), 0.0, &registry), None);
-        assert_eq!(history.interpolate(Tick(50), 0.5, &registry), None);
-    }
-
-    #[test]
-    fn interpolate_returns_none_when_tick_is_before_start() {
-        let registry = registry();
-        let mut history = ConfirmedHistory::<TestComp>::default();
-        history.push(Tick(10), TestComp(0.0));
-        history.push(Tick(20), TestComp(10.0));
-
-        assert_eq!(history.interpolate(Tick(5), 0.0, &registry), None);
-    }
-
-    #[test]
-    fn interpolate_returns_none_when_history_is_empty() {
-        let registry = registry();
-        let history = ConfirmedHistory::<TestComp>::default();
-
-        assert_eq!(history.interpolate(Tick(0), 0.0, &registry), None);
-    }
-
     #[test]
     fn inserts_history_when_confirmed_added_after_interpolated() {
         let mut app = App::new();
@@ -328,5 +269,66 @@ mod tests {
                 .entity(entity)
                 .contains::<ConfirmedHistory<TestComp>>()
         );
+    }
+
+    #[test]
+    fn test_interpolate_blends_between_two_keyframes() {
+        let registry = registry();
+        let mut history = ConfirmedHistory::<TestComp>::default();
+        history.push(Tick(10), TestComp(0.0));
+        history.push(Tick(20), TestComp(10.0));
+
+        assert_eq!(
+            history.interpolate(Tick(15), 0.0, &registry),
+            Some(TestComp(5.0))
+        );
+    }
+
+    // The idle-rebase path in update_confirmed_history writes the component
+    // directly when the buffer collapses to a single keyframe, so interpolate()
+    // returns None and the previously-written value stands.
+    #[test]
+    fn test_interpolate_returns_none_with_single_keyframe() {
+        let registry = registry();
+        let mut history = ConfirmedHistory::<TestComp>::default();
+        history.push(Tick(10), TestComp(42.0));
+
+        assert_eq!(history.interpolate(Tick(10), 0.0, &registry), None);
+        assert_eq!(history.interpolate(Tick(50), 0.5, &registry), None);
+    }
+
+    #[test]
+    fn test_interpolate_clamps_when_past_end_tick() {
+        let registry = registry();
+        let mut history = ConfirmedHistory::<TestComp>::default();
+        history.push(Tick(10), TestComp(0.0));
+        history.push(Tick(20), TestComp(10.0));
+
+        assert_eq!(
+            history.interpolate(Tick(30), 0.0, &registry),
+            Some(TestComp(10.0))
+        );
+        assert_eq!(
+            history.interpolate(Tick(20), 0.5, &registry),
+            Some(TestComp(10.0))
+        );
+    }
+
+    #[test]
+    fn test_interpolate_returns_none_when_tick_is_before_start() {
+        let registry = registry();
+        let mut history = ConfirmedHistory::<TestComp>::default();
+        history.push(Tick(10), TestComp(0.0));
+        history.push(Tick(20), TestComp(10.0));
+
+        assert_eq!(history.interpolate(Tick(5), 0.0, &registry), None);
+    }
+
+    #[test]
+    fn test_interpolate_returns_none_when_history_is_empty() {
+        let registry = registry();
+        let history = ConfirmedHistory::<TestComp>::default();
+
+        assert_eq!(history.interpolate(Tick(0), 0.0, &registry), None);
     }
 }

@@ -8,7 +8,6 @@ use avian3d::{math::Vector, prelude::*};
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use bevy_ecs::{
-    change_detection::DetectChanges,
     hierarchy::{ChildOf, Children},
     schedule::{IntoScheduleConfigs, SystemSet},
 };

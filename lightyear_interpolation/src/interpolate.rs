@@ -46,9 +46,6 @@ pub(crate) fn update_confirmed_history<C: Component + Clone>(
     // TODO: exclude host-server
     interpolation: Single<&InterpolationTimeline, With<IsSynced<InterpolationTimeline>>>,
     tick_duration: Res<TickDuration>,
-    // we don't insert the component immediately, instead we wait for:
-    // - either 2 updates, so that we can interpolate between them
-    // - or enough time has passed since the initial update
     mut query: Query<(Entity, &mut ConfirmedHistory<C>, Has<C>)>,
     mut commands: Commands,
 ) {

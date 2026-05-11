@@ -74,7 +74,7 @@ fn test_actions_on_client_entity() {
         .client_app()
         .world_mut()
         .entity_mut(client_action)
-        .insert(ActionMock::once(ActionState::Fired, true));
+        .insert(ActionMock::once(TriggerState::Fired, true));
     stepper.frame_step(1);
     let client_tick = stepper.client_tick(0);
 
@@ -90,7 +90,7 @@ fn test_actions_on_client_entity() {
     let mut actions = ActionData::base_value();
     BEIStateSequence::<BEIContext>::from_snapshot(ActionData::as_mut(&mut actions), &snapshot);
     // check that we received the snapshot on the server
-    assert_eq!(actions.0, ActionState::Fired);
+    assert_eq!(actions.0, TriggerState::Fired);
 }
 
 /// Check that ActionStates are stored correctly in the InputBuffer
@@ -166,7 +166,7 @@ fn test_buffer_inputs_with_delay() {
             .client_app()
             .world()
             .entity(client_action)
-            .contains::<ActionState>()
+            .contains::<TriggerState>()
     );
     assert!(
         stepper
@@ -199,12 +199,12 @@ fn test_buffer_inputs_with_delay() {
         .client_app()
         .world_mut()
         .entity_mut(client_action)
-        .insert(ActionMock::once(ActionState::Fired, true));
+        .insert(ActionMock::once(TriggerState::Fired, true));
     stepper.frame_step(1);
     let client_tick = stepper.client_tick(0);
 
     // check that the action state got buffered without any press (because the input is delayed)
-    // (we cannot use JustPressed because we start by ticking the ActionState)
+    // (we cannot use JustPressed because we start by ticking the TriggerState)
     // (i.e. the InputBuffer is empty for the current tick, and has the button press only with 1 tick of delay)
     let get_action_state_for_tick = |tick: Tick, app: &mut App| {
         let world = app.world_mut();
@@ -221,10 +221,10 @@ fn test_buffer_inputs_with_delay() {
     };
 
     let action_state = get_action_state_for_tick(client_tick, stepper.client_app());
-    assert_eq!(action_state, ActionState::None);
-    // if we check the next tick (delay of 1), we can see that the InputBuffer contains the ActionState with a press
+    assert_eq!(action_state, TriggerState::None);
+    // if we check the next tick (delay of 1), we can see that the InputBuffer contains the TriggerState with a press
     let action_state = get_action_state_for_tick(client_tick + 1, stepper.client_app());
-    assert_eq!(action_state, ActionState::Fired);
+    assert_eq!(action_state, TriggerState::Fired);
 
     // mock release the key
     info!("Mocking release on BEIAction1");
@@ -232,26 +232,26 @@ fn test_buffer_inputs_with_delay() {
         .client_app()
         .world_mut()
         .entity_mut(client_action)
-        .insert(ActionMock::once(ActionState::None, true));
+        .insert(ActionMock::once(TriggerState::None, true));
 
-    // TODO: ideally we would check that the value of the ActionState inside FixedUpdate is correct
+    // TODO: ideally we would check that the value of the TriggerState inside FixedUpdate is correct
     // step another frame, this time we get the buffered input from earlier
     stepper.frame_step(1);
     let action_state = get_action_state_for_tick(client_tick + 1, stepper.client_app());
-    assert_eq!(action_state, ActionState::Fired);
+    assert_eq!(action_state, TriggerState::Fired);
     let action_state = get_action_state_for_tick(client_tick + 2, stepper.client_app());
-    assert_eq!(action_state, ActionState::None);
+    assert_eq!(action_state, TriggerState::None);
 
-    // TODO: instead of just swapping the ActionState with the
-    // the fixed_update_state ActionState outside of FixedUpdate is the delayed one
+    // TODO: instead of just swapping the TriggerState with the
+    // the fixed_update_state TriggerState outside of FixedUpdate is the delayed one
     assert_eq!(
         stepper
             .client_app()
             .world()
             .entity(client_action)
-            .get::<ActionState>()
+            .get::<TriggerState>()
             .unwrap(),
-        &ActionState::None
+        &TriggerState::None
     );
 }
 
@@ -319,7 +319,7 @@ fn test_client_rollback() {
         .world_mut()
         .entity_mut(client_action)
         .insert(ActionMock::new(
-            ActionState::Fired,
+            TriggerState::Fired,
             true,
             MockSpan::Updates(3),
         ));
@@ -338,9 +338,9 @@ fn test_client_rollback() {
         .client_app()
         .world()
         .entity(client_action)
-        .get::<ActionState>()
+        .get::<TriggerState>()
         .unwrap();
-    assert_eq!(action_state, &ActionState::None);
+    assert_eq!(action_state, &TriggerState::None);
 
     // trigger a rollback
     // at client_tick, the elapsed_time should be 0.2.
@@ -433,7 +433,7 @@ fn test_client_rollback_bei_events() {
         .world_mut()
         .entity_mut(client_action)
         .insert(ActionMock::new(
-            ActionState::Fired,
+            TriggerState::Fired,
             true,
             MockSpan::Updates(1),
         ));
@@ -523,7 +523,7 @@ fn test_input_broadcasting_prediction() {
             ActionOf::<BEIContext>::new(client0_predicted),
             Action::<BEIAction1>::default(),
             ActionMock::new(
-                ActionState::Fired,
+                TriggerState::Fired,
                 ActionValue::Bool(true),
                 MockSpan::Manual,
             ),
@@ -569,10 +569,10 @@ fn test_input_broadcasting_prediction() {
             .get(client1_tick + 1)
             .unwrap(),
         &ActionsSnapshot {
-            state: ActionState::Fired,
+            state: TriggerState::Fired,
             value: ActionValue::Bool(true),
             time: ActionTime::default(),
-            events: ActionEvents::STARTED | ActionEvents::FIRED
+            events: ActionEvents::START | ActionEvents::FIRE
         }
     );
     assert_eq!(
@@ -584,13 +584,13 @@ fn test_input_broadcasting_prediction() {
             .get(client1_tick + 2)
             .unwrap(),
         &ActionsSnapshot {
-            state: ActionState::Fired,
+            state: TriggerState::Fired,
             value: ActionValue::Bool(true),
             time: ActionTime {
                 elapsed_secs: 0.01,
                 fired_secs: 0.01
             },
-            events: ActionEvents::FIRED
+            events: ActionEvents::FIRE
         }
     );
     // check that a rollback was triggered on client 1
@@ -615,13 +615,13 @@ fn test_input_broadcasting_prediction() {
             .get(client1_tick + 3)
             .unwrap(),
         &ActionsSnapshot {
-            state: ActionState::Fired,
+            state: TriggerState::Fired,
             value: ActionValue::Bool(true),
             time: ActionTime {
                 elapsed_secs: 0.02,
                 fired_secs: 0.02
             },
-            events: ActionEvents::FIRED
+            events: ActionEvents::FIRE
         }
     );
     // check that this time there was no new rollback since we predicted the correct input value

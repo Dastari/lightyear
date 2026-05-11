@@ -1,6 +1,9 @@
 use bevy_app::App;
+#[cfg(any(feature = "client", feature = "server"))]
 use bevy_ecs::prelude::*;
+#[cfg(any(feature = "client", feature = "server"))]
 use bevy_ecs::relationship::Relationship;
+#[cfg(any(feature = "client", feature = "server"))]
 use bevy_utils::prelude::DebugName;
 #[cfg(feature = "client")]
 use {
