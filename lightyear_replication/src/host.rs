@@ -36,10 +36,12 @@ impl HostServerPlugin {
     /// that the host-server wants to replicate, so that client code can still query for them
     fn add_prediction_interpolation_components(
         mut commands: Commands,
-        local_client: Single<(Entity, Ref<HostClient>)>,
+        local_client: Query<(Entity, Ref<HostClient>)>,
         root_query: Query<HostServerQueryData>,
     ) {
-        let (local_entity, host_client) = local_client.into_inner();
+        let Ok((local_entity, host_client)) = local_client.single() else {
+            return;
+        };
 
         root_query.iter().for_each(
             |HostServerQueryDataItem {
