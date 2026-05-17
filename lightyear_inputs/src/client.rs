@@ -73,7 +73,7 @@ use lightyear_interpolation::prelude::*;
 use lightyear_messages::plugin::MessageSystems;
 use lightyear_messages::prelude::{MessageReceiver, MessageSender};
 use lightyear_prediction::prelude::*;
-use lightyear_replication::prelude::PreSpawned;
+use lightyear_replication::prelude::{ControlledBy, PreSpawned};
 use lightyear_sync::plugin::SyncSystems;
 use lightyear_sync::prelude::client::IsSynced;
 use lightyear_sync::prelude::{InputTimeline, InputTimelineConfig};
@@ -256,19 +256,24 @@ fn buffer_action_state<S: ActionStateSequence>(
     // we buffer inputs even for the Host-Server so that
     // 1. the HostServer client can broadcast inputs to other clients
     // 2. the HostServer client can have input delay
-    input_timeline: Single<&InputTimeline, Without<Rollback>>,
+    input_timeline: Single<(Entity, &InputTimeline), (With<Client>, Without<Rollback>)>,
     mut action_state_query: Query<
         (
             Entity,
             StateRef<S>,
             &mut InputBuffer<S::Snapshot, S::Action>,
+            Option<&ControlledBy>,
         ),
         (With<S::Marker>, Allow<PredictionDisable>),
     >,
 ) {
+    let (client_entity, input_timeline) = input_timeline.into_inner();
     let current_tick = local_timeline.tick();
     let tick = current_tick + input_timeline.input_delay() as i16;
-    for (entity, action_state, mut input_buffer) in action_state_query.iter_mut() {
+    for (entity, action_state, mut input_buffer, controlled_by) in action_state_query.iter_mut() {
+        if controlled_by.is_some_and(|controlled_by| controlled_by.owner != client_entity) {
+            continue;
+        }
         input_buffer.set(tick, S::to_snapshot(action_state));
         trace!(
             ?entity,
@@ -385,14 +390,22 @@ fn get_action_state<S: ActionStateSequence>(
 /// (e.g. the delayed action state) because all inputs (i.e. diffs) are applied to the delayed action-state.
 fn get_delayed_action_state<S: ActionStateSequence>(
     timeline: Res<LocalTimeline>,
-    sender: Query<(&InputTimeline, Has<Rollback>), With<IsSynced<InputTimeline>>>,
+    sender: Query<
+        (Entity, &InputTimeline, Has<Rollback>),
+        (With<Client>, With<IsSynced<InputTimeline>>),
+    >,
     mut action_state_query: Query<
-        (Entity, StateMut<S>, &InputBuffer<S::Snapshot, S::Action>),
+        (
+            Entity,
+            StateMut<S>,
+            &InputBuffer<S::Snapshot, S::Action>,
+            Option<&ControlledBy>,
+        ),
         // Filter so that this is only for directly controlled players, not remote players
         (With<S::Marker>, Allow<PredictionDisable>),
     >,
 ) {
-    let Ok((input_timeline, is_rollback)) = sender.single() else {
+    let Ok((client_entity, input_timeline, is_rollback)) = sender.single() else {
         return;
     };
     let input_delay_ticks = input_timeline.input_delay() as i16;
@@ -401,7 +414,10 @@ fn get_delayed_action_state<S: ActionStateSequence>(
     }
     let tick = timeline.tick();
     let delayed_tick = tick + input_delay_ticks;
-    for (entity, action_state, input_buffer) in action_state_query.iter_mut() {
+    for (entity, action_state, input_buffer, controlled_by) in action_state_query.iter_mut() {
+        if controlled_by.is_some_and(|controlled_by| controlled_by.owner != client_entity) {
+            continue;
+        }
         // TODO: lots of clone + is complicated. Shouldn't we just have a DelayedActionState component + resource?
         //  the problem is that the Leafwing Plugin works on ActionState directly...
         if let Some(delayed_action_state) = input_buffer.get(delayed_tick) {
@@ -470,7 +486,7 @@ fn prepare_input_message<S: ActionStateSequence>(
     timeline: Res<LocalTimeline>,
     input_config: Res<InputConfig<S::Action>>,
     sender: Single<
-        (&InputTimeline, Has<HostClient>),
+        (Entity, &InputTimeline, Has<HostClient>),
         // the host-client doesn't need to send input messages since the ActionState is already on the entity
         // unless we want to rebroadcast the HostClient inputs to other clients (in which
         // case we prepare the input-message, which will be send_local to the server)
@@ -481,6 +497,7 @@ fn prepare_input_message<S: ActionStateSequence>(
             Entity,
             &InputBuffer<S::Snapshot, S::Action>,
             Option<&PreSpawned>,
+            Option<&ControlledBy>,
         ),
         (With<S::Marker>, Allow<PredictionDisable>),
     >,
@@ -497,7 +514,7 @@ fn prepare_input_message<S: ActionStateSequence>(
         }
     }
 
-    let (input_timeline, is_host_client) = sender.into_inner();
+    let (client_entity, input_timeline, is_host_client) = sender.into_inner();
     #[cfg(not(feature = "prediction"))]
     if is_host_client {
         // if there is not prediction, no need to rebroadcast inputs
@@ -522,12 +539,16 @@ fn prepare_input_message<S: ActionStateSequence>(
 
     // Send redundant inputs so that if a packet is lost, we can still recover.
     // The size of the input bundle scales with `send_interval`.
-    let mut num_ticks: u16 = ((input_config.send_interval.as_nanos() / tick_duration.as_nanos()) + 1)
-        .try_into()
-        .unwrap();
+    let mut num_ticks: u16 = ((input_config.send_interval.as_nanos() / tick_duration.as_nanos())
+        + 1)
+    .try_into()
+    .unwrap();
     num_ticks *= input_config.packet_redundancy;
     let mut message = InputMessage::<S>::new(tick);
-    for (entity, input_buffer, pre_spawned) in input_buffer_query.iter() {
+    for (entity, input_buffer, pre_spawned, controlled_by) in input_buffer_query.iter() {
+        if controlled_by.is_some_and(|controlled_by| controlled_by.owner != client_entity) {
+            continue;
+        }
         trace!(
             ?tick,
             ?entity,
@@ -861,12 +882,18 @@ fn receive_tick_events<S: ActionStateSequence>(
     trigger: On<SyncEvent<InputTimelineConfig>>,
     mut message_buffer: ResMut<MessageBuffer<S>>,
     mut input_buffer_query: Query<
-        &mut InputBuffer<S::Snapshot, S::Action>,
+        (
+            &mut InputBuffer<S::Snapshot, S::Action>,
+            Option<&ControlledBy>,
+        ),
         Allow<PredictionDisable>,
     >,
 ) {
     let delta = trigger.tick_delta;
-    for mut input_buffer in input_buffer_query.iter_mut() {
+    for (mut input_buffer, controlled_by) in input_buffer_query.iter_mut() {
+        if controlled_by.is_some_and(|controlled_by| controlled_by.owner != trigger.entity) {
+            continue;
+        }
         if let Some(start_tick) = input_buffer.start_tick {
             input_buffer.start_tick = Some(start_tick + delta);
             debug!(

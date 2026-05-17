@@ -296,7 +296,7 @@ impl SyncedTimeline for InputTimeline {
         // deadband: the controller may let the local timeline drift behind the
         // objective by this much without correcting.
         let obj =
-            remote + network_delay + jitter_margin + TickDelta::from_i32(1) + sync_error_margin
+            remote + network_delay + jitter_margin + TickDelta::from_i16(1) + sync_error_margin
                 - input_delay;
         trace!(
             ?remote,
@@ -394,6 +394,7 @@ impl SyncedTimeline for InputTimeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::timeline::remote::RemoteTimeline;
     use bevy_utils::default;
 
     fn assert_tick_instant_close(actual: TickInstant, expected: TickInstant) {
@@ -416,7 +417,7 @@ mod tests {
 
         let mut config = InputTimelineConfig::default();
         config.sync.jitter_multiple = 2;
-        config.sync.jitter_margin = 1.0;
+        config.sync.jitter_margin = Duration::from_millis(10);
         config.sync.error_margin = 0.75;
 
         let objective =
@@ -446,7 +447,7 @@ mod tests {
         let mut config =
             InputTimelineConfig::default().with_input_delay(InputDelayConfig::fixed_input_delay(2));
         config.sync.jitter_multiple = 2;
-        config.sync.jitter_margin = 1.0;
+        config.sync.jitter_margin = Duration::from_millis(10);
         config.sync.error_margin = 0.75;
 
         let mut timeline = InputTimeline::default();
@@ -482,7 +483,7 @@ mod tests {
         // `remote + 1`; the sent input tick must not be.
         let mut config =
             InputTimelineConfig::default().with_input_delay(InputDelayConfig::fixed_input_delay(2));
-        config.sync.jitter_margin = 0.5;
+        config.sync.jitter_margin = Duration::from_millis(5);
         assert!(
             config.sync.error_margin >= 1.0,
             "test premise: error_margin is at least 1 tick"
@@ -499,7 +500,7 @@ mod tests {
             tick_duration,
         );
         let worst_case_local = objective - worst_case_drift;
-        let sent_input_tick = worst_case_local + TickDelta::from_i32(2);
+        let sent_input_tick = worst_case_local + TickDelta::from_i16(2);
 
         let required_input_tick = TickInstant::from(Tick(101));
         assert!(
@@ -566,7 +567,7 @@ mod tests {
                 &sync_config,
                 Duration::from_millis(16)
             ),
-            12
+            13
         );
     }
 }
