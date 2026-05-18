@@ -283,12 +283,21 @@ impl SyncedTimeline for InputTimeline {
             tick_duration,
         );
         let input_delay: TickDelta = Tick(self.context.input_delay_ticks).into();
-        // NOTE: because of input delay, this could be in the past, which causes issues with Prediction
-        // let's make sure that we're always ahead of the server
-        let mut obj = remote + network_delay + jitter_margin - input_delay;
-        if obj < remote {
-            obj = remote + TickDelta::from_i16(1)
-        }
+        let sync_error_margin = TickDelta::from_duration(
+            tick_duration.mul_f32(config.sync.error_margin),
+            tick_duration,
+        );
+        // Inputs received by the server in `PreUpdate` are first read in
+        // `FixedPreUpdate`, after `LocalTimeline` advances in `FixedFirst`.
+        // Therefore an input packet that arrives while the server is at tick T
+        // must contain inputs for at least tick T + 1.
+        //
+        // `sync_error_margin` compensates for the sync controller's allowed
+        // deadband: the controller may let the local timeline drift behind the
+        // objective by this much without correcting.
+        let obj =
+            remote + network_delay + jitter_margin + TickDelta::from_i32(1) + sync_error_margin
+                - input_delay;
         trace!(
             ?remote,
             ?network_delay,
@@ -386,6 +395,122 @@ impl SyncedTimeline for InputTimeline {
 mod tests {
     use super::*;
     use bevy_utils::default;
+
+    fn assert_tick_instant_close(actual: TickInstant, expected: TickInstant) {
+        let error = (actual - expected).to_f32().abs();
+        assert!(
+            error < 0.001,
+            "expected {expected:?}, got {actual:?}, error {error}"
+        );
+    }
+
+    #[test]
+    fn input_timeline_objective_preserves_margin_after_sync_deadband() {
+        let tick_duration = Duration::from_millis(10);
+        let mut remote = RemoteTimeline::default();
+        remote.set_now(TickInstant::from(Tick(100)));
+
+        let mut ping_manager = PingManager::default();
+        ping_manager.rtt_estimator_ewma.final_stats.rtt = Duration::from_millis(40);
+        ping_manager.rtt_estimator_ewma.final_stats.jitter = Duration::from_millis(5);
+
+        let mut config = InputTimelineConfig::default();
+        config.sync.jitter_multiple = 2;
+        config.sync.jitter_margin = 1.0;
+        config.sync.error_margin = 0.75;
+
+        let objective =
+            InputTimeline::default().sync_objective(&remote, &config, &ping_manager, tick_duration);
+
+        // remote 100 + RTT/2 2 ticks + jitter margin 2 ticks
+        // + server input pipeline 1 tick + controller deadband 0.75 ticks.
+        assert_tick_instant_close(objective, TickInstant::lit("105.75"));
+
+        let earliest_uncorrected_timeline = objective - TickDelta::lit("0.75");
+        // Even if the sync controller chooses not to correct a -0.75 tick error,
+        // the client is still at the delivery objective that includes RTT/2 and
+        // jitter margin plus the server's one-tick input pipeline delay.
+        assert_tick_instant_close(earliest_uncorrected_timeline, TickInstant::lit("105"));
+    }
+
+    #[test]
+    fn input_delay_still_offsets_input_timeline_objective() {
+        let tick_duration = Duration::from_millis(10);
+        let mut remote = RemoteTimeline::default();
+        remote.set_now(TickInstant::from(Tick(100)));
+
+        let mut ping_manager = PingManager::default();
+        ping_manager.rtt_estimator_ewma.final_stats.rtt = Duration::from_millis(40);
+        ping_manager.rtt_estimator_ewma.final_stats.jitter = Duration::from_millis(5);
+
+        let mut config =
+            InputTimelineConfig::default().with_input_delay(InputDelayConfig::fixed_input_delay(2));
+        config.sync.jitter_multiple = 2;
+        config.sync.jitter_margin = 1.0;
+        config.sync.error_margin = 0.75;
+
+        let mut timeline = InputTimeline::default();
+        timeline.context.input_delay_ticks = 2;
+
+        let objective = timeline.sync_objective(&remote, &config, &ping_manager, tick_duration);
+
+        assert_tick_instant_close(objective, TickInstant::lit("103.75"));
+    }
+
+    /// The server reads inputs in `FixedPreUpdate`, after receiving packets in
+    /// `PreUpdate` and advancing its tick in `FixedFirst`. Inputs sent by the
+    /// client must therefore target at least `remote + 1`, even under
+    /// worst-case controller drift (`offset = -error_margin`).
+    ///
+    /// The post-replicon `+sync_error_margin` term in the objective
+    /// cancels with the symmetric controller drift, leaving the safety
+    /// margin riding on the explicit one-tick server input pipeline margin
+    /// plus `network_delay + jitter_margin`.
+    #[test]
+    fn sync_objective_keeps_sent_input_tick_ahead_under_worst_case_drift() {
+        let tick_duration = Duration::from_millis(10);
+        let mut remote = RemoteTimeline::default();
+        remote.set_now(TickInstant::from(Tick(100)));
+
+        // Localhost — zero RTT, zero jitter.
+        let mut ping_manager = PingManager::default();
+        ping_manager.rtt_estimator_ewma.final_stats.rtt = Duration::ZERO;
+        ping_manager.rtt_estimator_ewma.final_stats.jitter = Duration::ZERO;
+
+        // User tightens `jitter_margin` below 1.0 for snappier sync, while
+        // still using input delay. The local tick itself can be behind
+        // `remote + 1`; the sent input tick must not be.
+        let mut config =
+            InputTimelineConfig::default().with_input_delay(InputDelayConfig::fixed_input_delay(2));
+        config.sync.jitter_margin = 0.5;
+        assert!(
+            config.sync.error_margin >= 1.0,
+            "test premise: error_margin is at least 1 tick"
+        );
+
+        let mut timeline = InputTimeline::default();
+        timeline.context.input_delay_ticks = 2;
+        let objective = timeline.sync_objective(&remote, &config, &ping_manager, tick_duration);
+
+        // Controller may legitimately let `local - objective` reach
+        // `-error_margin` without correcting (see `SyncContext::speed_adjustment`).
+        let worst_case_drift = TickDelta::from_duration(
+            tick_duration.mul_f32(config.sync.error_margin),
+            tick_duration,
+        );
+        let worst_case_local = objective - worst_case_drift;
+        let sent_input_tick = worst_case_local + TickDelta::from_i32(2);
+
+        let required_input_tick = TickInstant::from(Tick(101));
+        assert!(
+            sent_input_tick >= required_input_tick,
+            "worst-case sent input tick is {sent_input_tick:?}, but the \
+             server reads inputs in FixedPreUpdate after receiving packets in \
+             PreUpdate and advancing in FixedFirst, so the packet must contain \
+             input for at least {required_input_tick:?} (= remote + 1).",
+        );
+    }
+
     #[test]
     fn test_input_delay_config() {
         let sync_config = SyncConfig::default();
