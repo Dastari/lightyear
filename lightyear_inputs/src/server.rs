@@ -1,11 +1,13 @@
 //! Handle input messages received from the clients
 
+use crate::HISTORY_DEPTH;
+#[cfg(feature = "prediction")]
+use crate::InputChannel;
 use crate::input_buffer::InputBuffer;
 use crate::input_message::{
     ActionStateQueryData, ActionStateSequence, InputMessage, InputTarget, StateMut,
 };
 use crate::plugin::InputPlugin;
-use crate::{HISTORY_DEPTH, InputChannel};
 #[cfg(feature = "metrics")]
 use alloc::format;
 use bevy_app::{App, FixedPreUpdate, Plugin, PreUpdate};
@@ -15,6 +17,7 @@ use bevy_ecs::{
     entity::{Entity, MapEntities},
     error::Result,
     query::With,
+    relationship::RelationshipTarget,
     resource::Resource,
     schedule::{IntoScheduleConfigs, SystemSet},
     system::{Commands, Query, Res, Single},
@@ -27,14 +30,100 @@ use lightyear_connection::prelude::NetworkTarget;
 use lightyear_connection::server::Started;
 use lightyear_core::id::RemoteId;
 use lightyear_core::prelude::LocalTimeline;
-use lightyear_core::tick::TickDuration;
+use lightyear_core::tick::{Tick, TickDuration};
 use lightyear_link::prelude::{LinkOf, Server};
 use lightyear_messages::plugin::MessageSystems;
 use lightyear_messages::prelude::MessageReceiver;
+#[cfg(feature = "prediction")]
 use lightyear_messages::server::ServerMultiMessageSender;
+use lightyear_replication::control::ControlledByRemote;
 use lightyear_replication::prelude::{PreSpawned, Room};
 use tracing::{debug, error, trace};
 
+/// Maximum number of ticks ahead of the server's current tick that an
+/// incoming `InputMessage::end_tick` is allowed to be. Messages with
+/// `end_tick > server_tick + MAX_INPUT_LOOKAHEAD_TICKS` are dropped
+/// before they're written into the [`InputBuffer`].
+///
+/// Without this bound, [`InputBuffer::set_raw`] extends the internal
+/// `VecDeque` to fit *any* tick value (filling intermediate entries
+/// with `SameAsPrecedent`). A modified client sending
+/// `end_tick = current + 30_000` would cause a 30 000-entry allocation
+/// per message; repeated across messages / connections, the server is
+/// memory-exhausted.
+///
+/// Legitimate clients run at most a few ticks ahead of the server
+/// (typical `InputDelayConfig` values are 0–3 ticks). 64 ticks
+/// (~1 s at 64 Hz) is generous compared to that range while still
+/// bounding attacker memory cost per message.
+const MAX_INPUT_LOOKAHEAD_TICKS: i16 = 64;
+
+/// Maximum number of ticks BEHIND the server's current tick that an
+/// incoming `InputMessage::end_tick` is allowed to be.
+///
+/// Past-direction messages are normally handled harmlessly by
+/// [`InputBuffer::set_raw`]'s start-tick guard. The reason we still
+/// bound them: `Tick - Tick` returns `i16` via signed wrapping
+/// arithmetic over `u16` tick values. A far-future tick at the i16
+/// boundary (`end_tick = server_tick + 2^15`) wraps to `i16::MIN`,
+/// which a naive `delta <= LOOKAHEAD` check would accept. Rejecting
+/// "very far past" deltas catches that wrap-around attack while still
+/// accepting reasonable late inputs (up to ~4 s of network lag at 64
+/// Hz).
+const MAX_INPUT_PAST_TICKS: i16 = 256;
+
+/// Authorizes an `InputTarget::Entity` from a remote peer.
+///
+/// Returns `true` iff `target_entity` is listed in the peer's
+/// [`ControlledByRemote`] (auto-populated when `ControlledBy { owner: peer }`
+/// is added to a controlled entity). `None` means the peer controls
+/// nothing yet — reject.
+///
+/// **Host-client bypass.** Caller checks `RemoteId::is_local()` before
+/// invoking this helper; host clients drive inputs through in-process
+/// state and have no `ControlledByRemote`.
+///
+/// **`InputTarget::PreSpawned` bypass.** PreSpawned targets are identified
+/// by a hash (spawn tick + sorted component net-IDs + optional user salt),
+/// not entity id, so they bypass this check at the call site. A client
+/// that knows the salt could forge a colliding hash — a pre-existing risk
+/// out of scope here; a follow-up could bind `PreSpawned` to an owner.
+///
+/// **Distinct from `HasAuthority` / `AuthorityPeer`.** This helper uses
+/// `ControlledBy` (semantic input ownership, rarely changes), NOT the
+/// dynamic simulation-authority components that transfer via
+/// `GiveAuthority`. `examples/distributed_authority` uses both
+/// independently. If your use case needs input authority to follow
+/// `GiveAuthority` (e.g. a vehicle multiple players take turns driving),
+/// update `ControlledBy` alongside the authority transfer.
+pub(crate) fn is_input_target_authorized(
+    target_entity: Entity,
+    controlled_by_remote: Option<&ControlledByRemote>,
+) -> bool {
+    match controlled_by_remote {
+        None => false,
+        Some(controlled) => controlled.collection().contains(&target_entity),
+    }
+}
+
+/// Returns `true` iff `end_tick - server_tick` falls within
+/// `[-MAX_INPUT_PAST_TICKS, MAX_INPUT_LOOKAHEAD_TICKS]`. See those
+/// constants for the threat model behind each bound.
+///
+/// The symmetric past bound is what makes this safe under wrap-around: a
+/// naive `delta <= MAX_LOOKAHEAD` check accepts `i16::MIN` because it's
+/// trivially ≤ any positive bound. Rejecting on both ends eliminates the
+/// ambiguity regardless of which interpretation an attacker intended.
+pub(crate) fn is_input_within_lookahead(end_tick: Tick, server_tick: Tick) -> bool {
+    let delta = end_tick - server_tick;
+    (-MAX_INPUT_PAST_TICKS..=MAX_INPUT_LOOKAHEAD_TICKS).contains(&delta)
+}
+
+/// Server-side plugin that receives input messages from clients and applies
+/// them to [`InputBuffer`](crate::input_buffer::InputBuffer) components.
+///
+/// If `rebroadcast_inputs` is enabled, the server also forwards input messages
+/// to other clients so they can use them for remote-player prediction.
 pub struct ServerInputPlugin<S> {
     pub rebroadcast_inputs: bool,
     pub marker: core::marker::PhantomData<S>,
@@ -144,7 +233,7 @@ fn receive_input_message<S: ActionStateSequence>(
     config: Res<ServerInputConfig<S::Action>>,
     server: Query<&Server>,
     // make sure to only rebroadcast inputs to connected clients
-    mut sender: ServerMultiMessageSender<With<Connected>>,
+    #[cfg(feature = "prediction")] mut sender: ServerMultiMessageSender<With<Connected>>,
     tick_duration: Res<TickDuration>,
     rooms: Query<&Room>,
     timeline: Res<LocalTimeline>,
@@ -155,6 +244,11 @@ fn receive_input_message<S: ActionStateSequence>(
             &mut MessageReceiver<InputMessage<S>>,
             &RemoteId,
             Option<&InputRebroadcaster<S::Action>>,
+            // List of entities this peer is authorized to control.
+            // Inputs targeting entities outside this list are dropped
+            // so a modified client cannot forge
+            // `InputTarget::Entity(other)` to hijack another player.
+            Option<&ControlledByRemote>,
         ),
         // We also receive inputs from the HostClient, in case we want the HostClient's inputs to be
         // rebroadcast to other clients (so that they can do prediction of the HostClient's entity)
@@ -165,7 +259,7 @@ fn receive_input_message<S: ActionStateSequence>(
     mut commands: Commands,
 ) -> Result {
     // TODO: use par_iter_mut
-    receivers.iter_mut().try_for_each(|(client_entity, link_of, mut receiver, client_id, rebroadcaster)| {
+    receivers.iter_mut().try_for_each(|(client_entity, link_of, mut receiver, client_id, rebroadcaster, controlled_by_remote)| {
         // TODO: this drains the messages... but the user might want to re-broadcast them?
         //  should we just read instead?
         let server_entity = link_of.server;
@@ -184,12 +278,47 @@ fn receive_input_message<S: ActionStateSequence>(
             // }
             trace!(?tick, ?client_id, action = ?DebugName::type_name::<S::Action>().shortname(), ?message.end_tick, ?message.inputs, "received input message");
 
-            // TODO: or should we try to store in a buffer the interpolation delay for the exact tick
-            //  that the message was intended for?
+            if !is_input_within_lookahead(message.end_tick, tick) {
+                trace!(
+                    ?tick,
+                    ?client_id,
+                    end_tick = ?message.end_tick,
+                    "Dropping input message: end_tick outside [server-{}, server+{}] window",
+                    MAX_INPUT_PAST_TICKS,
+                    MAX_INPUT_LOOKAHEAD_TICKS,
+                );
+                return Ok(())
+            }
+
+            // Connection-level metadata: apply before the target filter
+            // so it still updates when every target is dropped.
             #[cfg(feature = "interpolation")]
             if let Some(interpolation_delay) = message.interpolation_delay {
-                // update the interpolation delay estimate for the client
                 commands.entity(client_entity).insert(interpolation_delay);
+            }
+
+            // Filter pre-rebroadcast so the server doesn't relay forged
+            // entries to other clients.
+            if !client_id.is_local() {
+                let before = message.inputs.len();
+                message.inputs.retain(|data| match data.target {
+                    InputTarget::Entity(entity) => {
+                        is_input_target_authorized(entity, controlled_by_remote)
+                    }
+                    InputTarget::PreSpawned(_) => true,
+                });
+                let dropped = before - message.inputs.len();
+                if dropped > 0 {
+                    trace!(
+                        ?tick,
+                        ?client_id,
+                        dropped,
+                        "Filtered unauthorized input targets (spoofed-target defense)",
+                    );
+                    if message.inputs.is_empty() {
+                        return Ok(())
+                    }
+                }
             }
 
             #[cfg(feature = "prediction")]
@@ -229,6 +358,10 @@ fn receive_input_message<S: ActionStateSequence>(
             for data in message.inputs {
                 let Some(entity) = (match data.target {
                     InputTarget::Entity(entity) => {
+                        // Authorization was already enforced by the
+                        // `message.inputs.retain` filter above (or
+                        // bypassed for `is_local()`); unauthorized
+                        // targets cannot reach this point.
                         Some(entity)
                     },
                     InputTarget::PreSpawned(hash) => {
@@ -344,5 +477,108 @@ fn update_action_state<S: ActionStateSequence>(
         // fallback on the last known value
         input_buffer.pop_keeping_last(tick - history_depth);
         // info!("Buffer length: {}", input_buffer.len());
+    }
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::*;
+    use bevy_ecs::world::World;
+    use lightyear_replication::prelude::{ControlledBy, Lifetime};
+
+    /// No `ControlledByRemote` means the peer hasn't been granted
+    /// control yet — drop the input.
+    #[test]
+    fn authorization_rejects_when_controlled_by_remote_is_none() {
+        let mut world = World::new();
+        let entity = world.spawn_empty().id();
+        assert!(!is_input_target_authorized(entity, None));
+    }
+
+    /// The relationship-target machinery populates `ControlledByRemote`
+    /// when `ControlledBy { owner }` is added.
+    #[test]
+    fn authorization_accepts_legitimate_target_and_rejects_foreign() {
+        let mut world = World::new();
+        let peer = world.spawn_empty().id();
+        let controlled = world
+            .spawn(ControlledBy {
+                owner: peer,
+                lifetime: Lifetime::default(),
+            })
+            .id();
+        let foreign = world.spawn_empty().id();
+
+        let cbr = world
+            .entity(peer)
+            .get::<ControlledByRemote>()
+            .expect("ControlledByRemote auto-populated on the peer entity")
+            .clone();
+
+        assert!(is_input_target_authorized(controlled, Some(&cbr)));
+        assert!(!is_input_target_authorized(foreign, Some(&cbr)));
+    }
+
+    /// Forward bound is inclusive.
+    #[test]
+    fn lookahead_accepts_within_forward_bound() {
+        let server = Tick(1000);
+        assert!(is_input_within_lookahead(server, server));
+        assert!(is_input_within_lookahead(Tick(server.0 + 1), server));
+        assert!(is_input_within_lookahead(
+            Tick(server.0 + MAX_INPUT_LOOKAHEAD_TICKS as u16),
+            server,
+        ));
+        assert!(!is_input_within_lookahead(
+            Tick(server.0 + (MAX_INPUT_LOOKAHEAD_TICKS as u16) + 1),
+            server,
+        ));
+    }
+
+    /// Past bound is inclusive — legitimate late inputs accepted up to
+    /// `MAX_INPUT_PAST_TICKS` behind.
+    #[test]
+    fn lookahead_accepts_within_past_bound() {
+        let server = Tick(1000);
+        assert!(is_input_within_lookahead(Tick(server.0 - 1), server));
+        assert!(is_input_within_lookahead(
+            Tick(server.0 - MAX_INPUT_PAST_TICKS as u16),
+            server
+        ));
+        assert!(!is_input_within_lookahead(
+            Tick(server.0 - (MAX_INPUT_PAST_TICKS as u16) - 1),
+            server,
+        ));
+    }
+
+    /// `server + 2^15` wraps to `i16::MIN`; the symmetric past bound
+    /// rejects it. Also covers the plain `+30_000` DOS value (caught by
+    /// the forward bound, not the wrap defense).
+    #[test]
+    fn lookahead_rejects_wraparound_far_future() {
+        let server = Tick(1000);
+        let attack_wrap = Tick(server.0.wrapping_add(1u16 << 15));
+        assert!(
+            !is_input_within_lookahead(attack_wrap, server),
+            "wrap-around at exactly i16::MIN must be rejected",
+        );
+        let attack_wrap_plus_one = Tick(server.0.wrapping_add((1u16 << 15) + 1));
+        assert!(
+            !is_input_within_lookahead(attack_wrap_plus_one, server),
+            "wrap-around past i16::MIN must be rejected",
+        );
+        let attack_30000 = Tick(server.0.wrapping_add(30_000));
+        assert!(!is_input_within_lookahead(attack_30000, server));
+    }
+
+    /// The defense is arithmetic, not position-dependent: high
+    /// `server_tick` yields the same i16 delta for the same offset.
+    #[test]
+    fn lookahead_rejects_wraparound_at_high_server_tick() {
+        let server = Tick(u16::MAX / 2);
+        let attack = Tick(server.0.wrapping_add(1u16 << 15));
+        assert!(!is_input_within_lookahead(attack, server));
+        assert!(is_input_within_lookahead(Tick(server.0 + 64), server));
+        assert!(!is_input_within_lookahead(Tick(server.0 + 65), server));
     }
 }

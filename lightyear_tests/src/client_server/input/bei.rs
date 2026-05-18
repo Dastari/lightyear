@@ -16,7 +16,7 @@ use lightyear_link::Link;
 use lightyear_link::prelude::LinkConditionerConfig;
 use lightyear_messages::MessageManager;
 use lightyear_prediction::diagnostics::PredictionMetrics;
-use lightyear_replication::prelude::{PredictionTarget, Replicate};
+use lightyear_replication::prelude::{ControlledBy, PredictionTarget, Replicate};
 use lightyear_sync::prelude::client::{InputDelayConfig, InputTimelineConfig};
 use test_log::test;
 use tracing::info;
@@ -56,6 +56,14 @@ fn test_actions_on_client_entity() {
         .get_local(client_action)
         .expect("entity is not present in entity map");
     let client_of_entity = stepper.client_of(0).id();
+    stepper
+        .server_app
+        .world_mut()
+        .entity_mut(server_action)
+        .insert(ControlledBy {
+            owner: client_of_entity,
+            lifetime: Default::default(),
+        });
     // Check that the ActionOf component was mapped correctly on the server
     // (i.e the context entity is the Client on the client, and the ClientOf on the server)
     assert_eq!(
@@ -486,6 +494,7 @@ fn test_input_broadcasting_prediction() {
     ));
 
     // SETUP - Create an entity controlled by client 0, predicted by all clients
+    let client_of_0 = stepper.client_of(0).id();
     let server_entity = stepper
         .server_app
         .world_mut()
@@ -493,8 +502,13 @@ fn test_input_broadcasting_prediction() {
             Replicate::to_clients(NetworkTarget::All),
             PredictionTarget::to_clients(NetworkTarget::All),
             BEIContext,
+            ControlledBy {
+                owner: client_of_0,
+                lifetime: Default::default(),
+            },
         ))
         .id();
+
     stepper.frame_step_server_first(1);
 
     // Get the predicted entities on both clients
@@ -508,13 +522,10 @@ fn test_input_broadcasting_prediction() {
 
     // we spawn an action entity on the client
     // Add input markers to client 0, and make sure that it's replicated to client 1
-    let client0_tick = stepper.client_tick(0);
-    let client1_tick = stepper.client_tick(1);
     info!(
         ?server_entity,
         ?client0_predicted,
-        ?client0_tick,
-        ?client1_tick,
+        client_tick = ?stepper.client_tick(0),
         "Add input marker on client 0"
     );
     let client_action = stepper.client_apps[0]
@@ -522,11 +533,7 @@ fn test_input_broadcasting_prediction() {
         .spawn((
             ActionOf::<BEIContext>::new(client0_predicted),
             Action::<BEIAction1>::default(),
-            ActionMock::new(
-                TriggerState::Fired,
-                ActionValue::Bool(true),
-                MockSpan::Manual,
-            ),
+            bei::prelude::InputMarker::<BEIContext>::default(),
         ))
         .id();
 
@@ -537,6 +544,41 @@ fn test_input_broadcasting_prediction() {
         .entity_mapper
         .get_local(server_entity)
         .expect("entity not replicated to client 1");
+
+    stepper.frame_step(3);
+    let server_action = stepper
+        .client_of(0)
+        .get::<MessageManager>()
+        .unwrap()
+        .entity_mapper
+        .get_local(client_action)
+        .expect("action entity is not present in entity map");
+    stepper
+        .server_app
+        .world_mut()
+        .entity_mut(server_action)
+        .insert(ControlledBy {
+            owner: client_of_0,
+            lifetime: Default::default(),
+        });
+
+    let client1_tick = stepper.client_tick(1);
+    let rollbacks_before_rebroadcast = stepper.client_apps[1]
+        .world()
+        .get_resource::<PredictionMetrics>()
+        .unwrap()
+        .rollbacks;
+    stepper
+        .client_apps
+        .get_mut(0)
+        .unwrap()
+        .world_mut()
+        .entity_mut(client_action)
+        .insert(ActionMock::new(
+            TriggerState::Fired,
+            ActionValue::Bool(true),
+            MockSpan::Manual,
+        ));
 
     stepper.frame_step(5);
     // client0 + 1: client 0 sends the input (with 2 ticks delay)
@@ -594,14 +636,12 @@ fn test_input_broadcasting_prediction() {
         }
     );
     // check that a rollback was triggered on client 1
-    assert_eq!(
-        stepper.client_apps[1]
-            .world()
-            .get_resource::<PredictionMetrics>()
-            .unwrap()
-            .rollbacks,
-        1
-    );
+    let rollbacks_after_rebroadcast = stepper.client_apps[1]
+        .world()
+        .get_resource::<PredictionMetrics>()
+        .unwrap()
+        .rollbacks;
+    assert!(rollbacks_after_rebroadcast > rollbacks_before_rebroadcast);
 
     stepper.frame_step(1);
 
@@ -631,6 +671,6 @@ fn test_input_broadcasting_prediction() {
             .get_resource::<PredictionMetrics>()
             .unwrap()
             .rollbacks,
-        1
+        rollbacks_after_rebroadcast
     );
 }
