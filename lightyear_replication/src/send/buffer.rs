@@ -368,6 +368,12 @@ pub(crate) fn replicate_entity(
         return;
     }
 
+    // If the group is not set to send, skip this entity before buffering any
+    // group-scoped actions or updates.
+    if !group_ready {
+        return;
+    }
+
     // we use the entity's PreSpawned component (we cannot re-use the root's)
     let prespawned = entity_ref.get::<PreSpawned>();
 
@@ -384,11 +390,6 @@ pub(crate) fn replicate_entity(
             sender,
             sender_entity,
         );
-    }
-
-    // If the group is not set to send, skip this entity
-    if !group_ready {
-        return;
     }
 
     // d. all components that were added or changed and that are not disabled

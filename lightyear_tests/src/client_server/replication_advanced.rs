@@ -115,6 +115,70 @@ fn test_since_last_ack() {
     assert_ne!(group_channel.ack_bevy_tick, None);
 }
 
+#[test]
+fn test_replication_group_send_frequency_buffers_only_when_timer_elapses() {
+    let mut stepper = ClientServerStepper::from_config(StepperConfig::single());
+    let send_frequency = stepper.tick_duration * 4;
+
+    let server_entity = stepper
+        .server_app
+        .world_mut()
+        .spawn((
+            Replicate::to_clients(NetworkTarget::All),
+            ReplicationGroup::new_id(42).set_send_frequency(send_frequency),
+            CompA(1.0),
+        ))
+        .id();
+    stepper.frame_step_server_first(1);
+    let client_entity = stepper
+        .client(0)
+        .get::<MessageManager>()
+        .unwrap()
+        .entity_mapper
+        .get_local(server_entity)
+        .unwrap();
+    assert_eq!(
+        stepper
+            .client_app()
+            .world()
+            .get::<CompA>(client_entity)
+            .unwrap()
+            .0,
+        1.0
+    );
+
+    let mut first_observed_update = None;
+    let mut observed = 1.0;
+    for frame in 1..=8 {
+        let value = frame as f32 + 1.0;
+        stepper
+            .server_app
+            .world_mut()
+            .get_mut::<CompA>(server_entity)
+            .unwrap()
+            .0 = value;
+        stepper.frame_step_server_first(1);
+        observed = stepper
+            .client_app()
+            .world()
+            .get::<CompA>(client_entity)
+            .unwrap()
+            .0;
+        if observed > 1.0 && first_observed_update.is_none() {
+            first_observed_update = Some(frame);
+        }
+    }
+
+    assert!(
+        first_observed_update.is_some_and(|frame| frame > 1),
+        "send_frequency should prevent buffering the first changed sender tick"
+    );
+    assert!(
+        observed > 1.0,
+        "send_frequency should eventually buffer when its timer elapses"
+    );
+}
+
 /// Test that acks work correctly for updates split across multiple packets
 ///
 /// Check that we don't get the log: "Received an update message-id ack but we don't know the corresponding group id"

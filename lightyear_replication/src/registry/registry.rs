@@ -16,6 +16,7 @@ use bevy_ptr::{Ptr, PtrMut};
 use bevy_reflect::TypePath;
 use bevy_transform::components::Transform;
 use bevy_utils::prelude::DebugName;
+use core::num::NonZeroU16;
 use lightyear_core::network::NetId;
 use lightyear_messages::Message;
 use lightyear_serde::entity_map::{EntityMap, ReceiveEntityMap, SendEntityMap};
@@ -535,6 +536,31 @@ impl<C> ComponentRegistration<'_, C> {
             .world_mut()
             .resource_scope(|world, mut registry: Mut<ComponentRegistry>| {
                 registry.set_delta_compression::<C, Delta>(world);
+            });
+        self
+    }
+
+    /// Enable delta compression and force a full-value delta keyframe every `keyframe_interval`
+    /// ticks.
+    ///
+    /// On keyframe ticks, the sender serializes a [`DeltaType::FromBase`](crate::delta::DeltaType::FromBase)
+    /// delta even when it has an acknowledged previous value available. Other ticks keep the normal
+    /// acknowledged-tick diff behavior.
+    pub fn add_delta_compression_with_keyframe_interval<Delta>(
+        self,
+        keyframe_interval: NonZeroU16,
+    ) -> Self
+    where
+        C: Component<Mutability = Mutable> + PartialEq + Diffable<Delta>,
+        Delta: Serialize + DeserializeOwned + Message,
+    {
+        self.app
+            .world_mut()
+            .resource_scope(|world, mut registry: Mut<ComponentRegistry>| {
+                registry.set_delta_compression_with_keyframe_interval::<C, Delta>(
+                    world,
+                    Some(keyframe_interval),
+                );
             });
         self
     }

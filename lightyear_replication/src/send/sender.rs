@@ -1,4 +1,4 @@
-use crate::delta::DeltaManager;
+use crate::delta::{DeltaManager, DeltaType};
 use crate::error::ReplicationError;
 use crate::message::{ActionsChannel, EntityActions, MessageBuilder, SpawnAction, UpdatesChannel};
 use crate::prespawn::PreSpawned;
@@ -560,7 +560,7 @@ impl ReplicationSender {
         component_data: Ptr,
         registry: &ComponentRegistry,
         delta_manager: &DeltaManager,
-        _tick: Tick,
+        tick: Tick,
         remote_entity_map: &mut RemoteEntityMap,
     ) -> Result<(), ReplicationError> {
         #[cfg(feature = "metrics")]
@@ -569,12 +569,14 @@ impl ReplicationSender {
         }
         let group_channel = self.group_channels.entry(group_id).or_default();
         // Get the latest acked tick for this entity/component
-        let raw_data = group_channel
-            .delta_ack_ticks
-            .get(&(entity, kind))
-            .map(|&ack_tick| {
-                // we have an ack tick for this replication group, get the corresponding component value
-                // so we can compute a diff
+        let delta_type = registry.delta_type_for_update(
+            kind,
+            tick,
+            group_channel.delta_ack_ticks.get(&(entity, kind)).copied(),
+        )?;
+        let raw_data = match delta_type {
+            DeltaType::Normal { previous_tick } => {
+                let ack_tick = previous_tick;
                 let old_data = delta_manager
                     // NOTE: remember to use the local entity for local bookkeeping
                     .get(entity, ack_tick, kind)
@@ -600,9 +602,9 @@ impl ReplicationSender {
                         &mut remote_entity_map.local_to_remote,
                     )?;
                 }
-                Ok::<Bytes, ReplicationError>(self.writer.split())
-            })
-            .unwrap_or_else(|| {
+                self.writer.split()
+            }
+            DeltaType::FromBase => {
                 // SAFETY: the component_data is a pointer to a component that corresponds to kind
                 unsafe {
                     // compute a diff from the base value, and serialize that
@@ -613,8 +615,9 @@ impl ReplicationSender {
                         &mut remote_entity_map.local_to_remote,
                     )?;
                 }
-                Ok::<Bytes, ReplicationError>(self.writer.split())
-            })?;
+                self.writer.split()
+            }
+        };
         trace!(?kind, "Inserting pending update!");
         // use the network entity when serializing
         group_channel

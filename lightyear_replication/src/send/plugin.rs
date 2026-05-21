@@ -201,32 +201,32 @@ impl ReplicationSendPlugin {
         });
     }
 
-    // /// Tick the internal timers of all replication groups.
-    // fn tick_replication_group_timers(
-    //     time_manager: Res<TimeManager>,
-    //     mut replication_groups: Query<&mut ReplicationGroup, With<Replicating>>,
-    // ) {
-    //     for mut replication_group in replication_groups.iter_mut() {
-    //         if let Some(send_frequency) = &mut replication_group.send_frequency {
-    //             send_frequency.tick(time_manager.delta());
-    //             if send_frequency.finished() {
-    //                 replication_group.should_send = true;
-    //             }
-    //         }
-    //     }
-    // }
+    /// Tick the internal timers of all replication groups.
+    fn tick_replication_group_timers(
+        time: Res<Time<Real>>,
+        mut replication_groups: Query<&mut ReplicationGroup, With<Replicating>>,
+    ) {
+        for mut replication_group in replication_groups.iter_mut() {
+            if let Some(send_frequency) = &mut replication_group.send_frequency {
+                send_frequency.tick(time.delta());
+                if send_frequency.is_finished() {
+                    replication_group.should_send = true;
+                }
+            }
+        }
+    }
 
-    // /// After we buffer updates, reset all the `should_send` to false
-    // /// for the replication groups that have a `send_frequency`
-    // fn update_replication_group_should_send(
-    //     mut replication_groups: Query<&mut ReplicationGroup, With<Replicating>>,
-    // ) {
-    //     for mut replication_group in replication_groups.iter_mut() {
-    //         if replication_group.send_frequency.is_some() {
-    //             replication_group.should_send = false;
-    //         }
-    //     }
-    // }
+    /// After we buffer updates, reset all the `should_send` to false
+    /// for the replication groups that have a `send_frequency`.
+    fn update_replication_group_should_send(
+        mut replication_groups: Query<&mut ReplicationGroup, With<Replicating>>,
+    ) {
+        for mut replication_group in replication_groups.iter_mut() {
+            if replication_group.send_frequency.is_some() {
+                replication_group.should_send = false;
+            }
+        }
+    }
 }
 
 impl Plugin for ReplicationSendPlugin {
@@ -276,23 +276,22 @@ impl Plugin for ReplicationSendPlugin {
         );
         app.add_systems(
             PostUpdate,
+            Self::tick_replication_group_timers.in_set(ReplicationBufferSystems::BeforeBuffer),
+        );
+        app.add_systems(
+            PostUpdate,
             Self::update_priority.after(TransportSystems::Send),
         );
         app.add_systems(
             PostUpdate,
             Self::send_replication_messages.in_set(ReplicationBufferSystems::Flush),
         );
-
-        // app.add_systems(
-        //     PostUpdate,
-        //     (
-        //         crate::send_plugin::ReplicationSendPlugin::tick_replication_group_timers
-        //             .in_set(InternalReplicationSet::<R::SetMarker>::BeforeBuffer),
-        //         crate::send_plugin::ReplicationSendPlugin::update_replication_group_should_send
-        //             // note that this runs every send_interval
-        //             .in_set(InternalReplicationSet::<R::SetMarker>::AfterBuffer),
-        //     ),
-        // );
+        app.add_systems(
+            PostUpdate,
+            Self::update_replication_group_should_send
+                // note that this runs every send_interval
+                .in_set(ReplicationBufferSystems::AfterBuffer),
+        );
     }
 
     fn finish(&self, app: &mut App) {
@@ -436,4 +435,71 @@ pub enum ReplicationBufferSystems {
 #[derive(Resource, Default)]
 pub(crate) struct ReplicableRootEntities {
     pub(crate) entities: EntityIndexSet,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::send::components::Replicating;
+    use bevy_ecs::system::RunSystemOnce;
+    use core::time::Duration;
+
+    #[test]
+    fn replication_group_send_frequency_timer_controls_buffer_gate() {
+        let mut world = World::new();
+        world.insert_resource(Time::<Real>::default());
+        let entity = world
+            .spawn((
+                Replicating,
+                ReplicationGroup::new_id(7).set_send_frequency(Duration::from_millis(100)),
+            ))
+            .id();
+
+        assert!(
+            world
+                .entity(entity)
+                .get::<ReplicationGroup>()
+                .unwrap()
+                .should_send
+        );
+
+        world
+            .run_system_once(ReplicationSendPlugin::update_replication_group_should_send)
+            .unwrap();
+        assert!(
+            !world
+                .entity(entity)
+                .get::<ReplicationGroup>()
+                .unwrap()
+                .should_send
+        );
+
+        world
+            .resource_mut::<Time<Real>>()
+            .advance_by(Duration::from_millis(50));
+        world
+            .run_system_once(ReplicationSendPlugin::tick_replication_group_timers)
+            .unwrap();
+        assert!(
+            !world
+                .entity(entity)
+                .get::<ReplicationGroup>()
+                .unwrap()
+                .should_send
+        );
+
+        world
+            .resource_mut::<Time<Real>>()
+            .advance_by(Duration::from_millis(50));
+        world
+            .run_system_once(ReplicationSendPlugin::tick_replication_group_timers)
+            .unwrap();
+        assert!(
+            world
+                .entity(entity)
+                .get::<ReplicationGroup>()
+                .unwrap()
+                .should_send
+        );
+    }
 }

@@ -15,6 +15,7 @@ use bevy_ecs::{
 use bevy_ptr::{Ptr, PtrMut};
 use bevy_utils::prelude::DebugName;
 use core::any::TypeId;
+use core::num::NonZeroU16;
 use core::ptr::NonNull;
 use lightyear_core::tick::Tick;
 use lightyear_messages::Message;
@@ -37,6 +38,21 @@ impl ComponentRegistry {
     ) where
         Delta: Serialize + DeserializeOwned + Message,
     {
+        self.set_delta_compression_with_keyframe_interval::<C, Delta>(world, None);
+    }
+
+    /// Register delta compression functions for a component, with an optional forced full-value
+    /// keyframe interval.
+    pub fn set_delta_compression_with_keyframe_interval<
+        C: Component<Mutability = Mutable> + PartialEq + Diffable<Delta>,
+        Delta,
+    >(
+        &mut self,
+        world: &mut World,
+        keyframe_interval: Option<NonZeroU16>,
+    ) where
+        Delta: Serialize + DeserializeOwned + Message,
+    {
         let kind = ComponentKind::of::<C>();
         let delta_kind = ComponentKind::of::<DeltaMessage<Delta>>();
 
@@ -50,7 +66,7 @@ impl ComponentRegistry {
                     DebugName::type_name::<C>()
                 );
             });
-        metadata.delta = Some(ErasedDeltaFns::new::<C, Delta>());
+        metadata.delta = Some(ErasedDeltaFns::new::<C, Delta>(keyframe_interval));
 
         let mut predicted = false;
         let mut interpolated = false;
@@ -76,6 +92,28 @@ impl ComponentRegistry {
         new_metadata.set_predicted(predicted);
         new_metadata.set_interpolated(interpolated);
         delta_metadata.replication = Some(new_metadata);
+    }
+
+    pub(crate) fn delta_type_for_update(
+        &self,
+        kind: ComponentKind,
+        tick: Tick,
+        previous_tick: Option<Tick>,
+    ) -> Result<DeltaType, ComponentError> {
+        let delta_fns = self
+            .component_metadata_map
+            .get(&kind)
+            .and_then(|m| m.delta.as_ref())
+            .ok_or(ComponentError::MissingDeltaFns)?;
+
+        if delta_fns.should_send_keyframe(tick) {
+            return Ok(DeltaType::FromBase);
+        }
+        Ok(
+            previous_tick.map_or(DeltaType::FromBase, |previous_tick| DeltaType::Normal {
+                previous_tick,
+            }),
+        )
     }
 
     /// # Safety
@@ -384,10 +422,13 @@ pub(crate) struct ErasedDeltaFns {
     pub apply_diff: ErasedApplyDiffFn,
     pub drop: ErasedDropFn,
     pub drop_delta_message: ErasedDropFn,
+    pub keyframe_interval: Option<NonZeroU16>,
 }
 
 impl ErasedDeltaFns {
-    pub(crate) fn new<C: Component + Diffable<Delta>, Delta: Message>() -> Self {
+    pub(crate) fn new<C: Component + Diffable<Delta>, Delta: Message>(
+        keyframe_interval: Option<NonZeroU16>,
+    ) -> Self {
         Self {
             type_id: TypeId::of::<C>(),
             type_name: DebugName::type_name::<C>(),
@@ -398,7 +439,13 @@ impl ErasedDeltaFns {
             apply_diff: erased_apply_diff::<C, Delta>,
             drop: erased_drop::<C>,
             drop_delta_message: erased_drop::<DeltaMessage<Delta>>,
+            keyframe_interval,
         }
+    }
+
+    fn should_send_keyframe(&self, tick: Tick) -> bool {
+        self.keyframe_interval
+            .is_some_and(|interval| tick.0 % interval.get() == 0)
     }
 }
 
@@ -407,7 +454,7 @@ mod tests {
     use super::*;
 
     use alloc::{vec, vec::Vec};
-    use bevy_ecs::component::Component;
+    use bevy_ecs::component::{Component, ComponentId};
     use bevy_platform::collections::HashSet;
     use bevy_reflect::Reflect;
     use serde::Deserialize;
@@ -454,7 +501,7 @@ mod tests {
 
     #[test]
     fn test_erased_clone() {
-        let erased_fns = ErasedDeltaFns::new::<CompDelta, Vec<usize>>();
+        let erased_fns = ErasedDeltaFns::new::<CompDelta, Vec<usize>>(None);
         let data = CompDelta(vec![1]);
         // clone data
         let cloned = unsafe { (erased_fns.clone)(Ptr::from(&data)) };
@@ -481,7 +528,7 @@ mod tests {
 
     #[test]
     fn test_erased_diff() {
-        let erased_fns = ErasedDeltaFns::new::<CompDelta, Vec<usize>>();
+        let erased_fns = ErasedDeltaFns::new::<CompDelta, Vec<usize>>(None);
         let old_data = CompDelta(vec![1]);
         let new_data = CompDelta(vec![1, 2]);
 
@@ -507,7 +554,7 @@ mod tests {
 
     #[test]
     fn test_erased_from_base_diff() {
-        let erased_fns = ErasedDeltaFns::new::<CompDelta, Vec<usize>>();
+        let erased_fns = ErasedDeltaFns::new::<CompDelta, Vec<usize>>(None);
         let new_data = CompDelta(vec![1, 2]);
         let delta = unsafe { (erased_fns.diff_from_base)(Ptr::from(&new_data)) };
         let casted = delta.cast::<DeltaMessage<Vec<usize>>>();
@@ -522,10 +569,76 @@ mod tests {
 
     #[test]
     fn test_apply_diff() {
-        let erased_fns = ErasedDeltaFns::new::<CompDelta, Vec<usize>>();
+        let erased_fns = ErasedDeltaFns::new::<CompDelta, Vec<usize>>(None);
         let mut old_data = CompDelta(vec![1]);
         let diff = vec![2];
         unsafe { (erased_fns.apply_diff)(PtrMut::from(&mut old_data), Ptr::from(&diff)) };
         assert_eq!(old_data, CompDelta(vec![1, 2]));
+    }
+
+    #[test]
+    fn test_delta_keyframe_interval_forces_from_base_on_interval() {
+        let mut registry = ComponentRegistry::default();
+        let kind = ComponentKind::of::<CompDelta>();
+        registry.component_metadata_map.insert(
+            kind,
+            crate::registry::registry::ComponentMetadata {
+                confirmed_component_id: ComponentId::new(0),
+                component_id: ComponentId::new(1),
+                replication: None,
+                serialization: None,
+                delta: Some(ErasedDeltaFns::new::<CompDelta, Vec<usize>>(
+                    NonZeroU16::new(3),
+                )),
+                #[cfg(feature = "deterministic")]
+                deterministic: None,
+            },
+        );
+
+        assert_eq!(
+            registry
+                .delta_type_for_update(kind, Tick(6), Some(Tick(4)))
+                .unwrap(),
+            DeltaType::FromBase
+        );
+        assert_eq!(
+            registry
+                .delta_type_for_update(kind, Tick(7), Some(Tick(4)))
+                .unwrap(),
+            DeltaType::Normal {
+                previous_tick: Tick(4)
+            }
+        );
+    }
+
+    #[test]
+    fn test_delta_without_keyframe_interval_keeps_existing_ack_behavior() {
+        let mut registry = ComponentRegistry::default();
+        let kind = ComponentKind::of::<CompDelta>();
+        registry.component_metadata_map.insert(
+            kind,
+            crate::registry::registry::ComponentMetadata {
+                confirmed_component_id: ComponentId::new(0),
+                component_id: ComponentId::new(1),
+                replication: None,
+                serialization: None,
+                delta: Some(ErasedDeltaFns::new::<CompDelta, Vec<usize>>(None)),
+                #[cfg(feature = "deterministic")]
+                deterministic: None,
+            },
+        );
+
+        assert_eq!(
+            registry
+                .delta_type_for_update(kind, Tick(6), Some(Tick(4)))
+                .unwrap(),
+            DeltaType::Normal {
+                previous_tick: Tick(4)
+            }
+        );
+        assert_eq!(
+            registry.delta_type_for_update(kind, Tick(6), None).unwrap(),
+            DeltaType::FromBase
+        );
     }
 }
