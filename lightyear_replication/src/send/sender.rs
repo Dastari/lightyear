@@ -9,7 +9,7 @@ use crate::send::metrics::{
     ReplicationSendChannel, ReplicationSendMetrics, ReplicationSendMetricsObserver,
     ReplicationSendStatus,
 };
-use alloc::{string::ToString, vec::Vec};
+use alloc::vec::Vec;
 use bevy_ecs::{
     change_detection::Tick as BevyTick,
     component::Component,
@@ -32,7 +32,7 @@ use lightyear_transport::prelude::Transport;
 #[cfg(feature = "trace")]
 use tracing::{Level, instrument};
 #[allow(unused_imports)]
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 type EntityHashMap<K, V> = HashMap<K, V, EntityHash>;
 type EntityHashSet<K> = HashSet<K, EntityHash>;
@@ -577,30 +577,39 @@ impl ReplicationSender {
         let raw_data = match delta_type {
             DeltaType::Normal { previous_tick } => {
                 let ack_tick = previous_tick;
-                let old_data = delta_manager
-                    // NOTE: remember to use the local entity for local bookkeeping
-                    .get(entity, ack_tick, kind)
-                    .ok_or(ReplicationError::DeltaCompressionError(
-                        "could not find old component value to compute delta".to_string(),
-                    ))
-                    .inspect_err(|e| {
-                        error!(
-                            ?entity,
-                            "Could not find old component value from tick {:?} to compute delta: {e:?}",
+                // NOTE: remember to use the local entity for local bookkeeping.
+                // Packet loss and retention cleanup can leave the remote ack tick
+                // newer than the oldest retained local base. In that case a full
+                // base-value diff is still lossless and avoids dropping the update.
+                if let Some(old_data) = delta_manager.get(entity, ack_tick, kind) {
+                    // SAFETY: the component_data and erased_data are pointers to components
+                    // that correspond to kind.
+                    unsafe {
+                        registry.serialize_diff(
                             ack_tick,
-                        );
-                        error!("DeltaManager: {:?}", delta_manager);
-                    })?;
-                // SAFETY: the component_data and erased_data is a pointer to a component that corresponds to kind
-                unsafe {
-                    registry.serialize_diff(
+                            old_data,
+                            component_data,
+                            &mut self.writer,
+                            kind,
+                            &mut remote_entity_map.local_to_remote,
+                        )?;
+                    }
+                } else {
+                    warn!(
+                        ?entity,
+                        ?kind,
+                        "Delta base from tick {:?} was not retained; falling back to base-value diff",
                         ack_tick,
-                        old_data,
-                        component_data,
-                        &mut self.writer,
-                        kind,
-                        &mut remote_entity_map.local_to_remote,
-                    )?;
+                    );
+                    // SAFETY: the component_data is a pointer to a component that corresponds to kind.
+                    unsafe {
+                        registry.serialize_diff_from_base_value(
+                            component_data,
+                            &mut self.writer,
+                            kind,
+                            &mut remote_entity_map.local_to_remote,
+                        )?;
+                    }
                 }
                 self.writer.split()
             }
