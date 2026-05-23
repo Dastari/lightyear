@@ -15,7 +15,7 @@ use bevy_ecs::{
     component::Component,
     entity::{Entity, EntityHash},
 };
-use bevy_platform::collections::{HashMap, HashSet};
+use bevy_platform::collections::{HashMap, HashSet, hash_map::Entry};
 use bevy_ptr::Ptr;
 use bevy_reflect::Reflect;
 use bevy_time::{Real, Time, Timer, TimerMode};
@@ -355,10 +355,13 @@ impl ReplicationSender {
                     channel.ack_bevy_tick = Some(bevy_tick);
                     // `delta_ack_ticks` won't grow indefinitely thanks to the cleanup systems
                     for (entity, component_kind) in delta {
-                        channel
-                            .delta_ack_ticks
-                            .insert((entity, component_kind), tick);
-                        delta_manager.as_ref().unwrap().receive_ack(entity, tick, component_kind, component_registry);
+                        channel.record_delta_ack_tick(entity, component_kind, tick);
+                        delta_manager.as_ref().unwrap().receive_ack(
+                            entity,
+                            tick,
+                            component_kind,
+                            component_registry,
+                        );
                     }
                 } _ => {
                     error!("Received an update message-id ack but the corresponding group channel does not exist");
@@ -701,10 +704,9 @@ impl ReplicationSender {
                 //      - tick 3: C1 update
                 //      - tick 4: C2 insert. C1 update. (if we send all updates since last_ack) !!!! We need to update the ack from the Insert only AFTER all the Updates are prepared!!!
                 //      - tick 5: Before, we would send C1 update again, since we didn't receive an ack for C1 yet. But now we stop sending it because we know that the message from tick 4 will be received.
-                for (entity, component_kind) in channel.pending_delta_updates.drain(..) {
-                    channel
-                        .delta_ack_ticks
-                        .insert((entity, component_kind), tick);
+                let pending_delta_updates = core::mem::take(&mut channel.pending_delta_updates);
+                for (entity, component_kind) in pending_delta_updates {
+                    channel.record_delta_ack_tick(entity, component_kind, tick);
                 }
             }
 
@@ -1165,12 +1167,33 @@ impl Default for GroupChannel {
     }
 }
 
+impl GroupChannel {
+    fn record_delta_ack_tick(&mut self, entity: Entity, component_kind: ComponentKind, tick: Tick) {
+        match self.delta_ack_ticks.entry((entity, component_kind)) {
+            Entry::Occupied(mut entry) => {
+                if tick - *entry.get() > 0 {
+                    *entry.get_mut() = tick;
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(tick);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::delta::{DeltaMessage, Diffable};
+    use crate::prelude::AppComponentExt;
     use crate::send::metrics::ReplicationSendMetricsSink;
     use alloc::vec;
+    use bevy_app::App;
+    use lightyear_serde::entity_map::ReceiveEntityMap;
+    use lightyear_serde::reader::Reader;
     use lightyear_transport::prelude::{ChannelMode, ChannelRegistry, ChannelSettings};
+    use serde::{Deserialize, Serialize};
     use std::sync::{Arc, Mutex};
 
     #[cfg(feature = "std")]
@@ -1209,6 +1232,313 @@ mod tests {
         fn observer(&self) -> ReplicationSendMetricsObserver {
             ReplicationSendMetricsObserver::new(self.clone())
         }
+    }
+
+    #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    struct DeltaComp(i16);
+
+    impl Diffable<i16> for DeltaComp {
+        fn base_value() -> Self {
+            Self(0)
+        }
+
+        fn diff(&self, new: &Self) -> i16 {
+            new.0 - self.0
+        }
+
+        fn apply_diff(&mut self, delta: &i16) {
+            self.0 += *delta;
+        }
+    }
+
+    fn update_metadata(
+        group_id: ReplicationGroupId,
+        tick: Tick,
+        delta: Vec<(Entity, ComponentKind)>,
+    ) -> UpdateMessageMetadata {
+        UpdateMessageMetadata {
+            group_id,
+            bevy_tick: BevyTick::new(u32::from(tick.0)),
+            tick,
+            metrics: ReplicationMessageMetrics {
+                tick,
+                group_id,
+                bytes: 0,
+                entity_count: 1,
+                component_count: delta.len(),
+            },
+            delta,
+        }
+    }
+
+    fn app_with_delta_comp() -> App {
+        let mut app = App::new();
+        app.register_component::<DeltaComp>()
+            .add_delta_compression::<i16>();
+        app
+    }
+
+    #[test]
+    fn test_delta_ack_ticks_do_not_regress_for_out_of_order_acks() {
+        let (mut sender, _) = setup();
+        let app = app_with_delta_comp();
+        let registry = app.world().resource::<ComponentRegistry>();
+        let delta_manager = DeltaManager::default();
+        let entity = Entity::from_bits(1);
+        let group = ReplicationGroupId(0);
+        let kind = ComponentKind::of::<DeltaComp>();
+        let message_1 = MessageId(0);
+        let message_2 = MessageId(1);
+        let tick_1 = Tick(10);
+        let tick_2 = Tick(12);
+
+        sender.group_channels.insert(group, GroupChannel::default());
+        sender.updates_message_id_to_group_id.insert(
+            message_2,
+            update_metadata(group, tick_2, vec![(entity, kind)]),
+        );
+        sender.updates_message_id_to_group_id.insert(
+            message_1,
+            update_metadata(group, tick_1, vec![(entity, kind)]),
+        );
+
+        sender.handle_acks(
+            registry,
+            Some(&delta_manager),
+            &mut vec![message_2, message_1],
+        );
+
+        let group_channel = sender.group_channels.get(&group).unwrap();
+        assert_eq!(
+            group_channel.delta_ack_ticks.get(&(entity, kind)),
+            Some(&tick_2)
+        );
+    }
+
+    #[test]
+    fn test_out_of_order_older_acks_still_release_delta_manager_data() {
+        let (mut sender, _) = setup();
+        let app = app_with_delta_comp();
+        let registry = app.world().resource::<ComponentRegistry>();
+        let delta_manager = DeltaManager::default();
+        let entity = Entity::from_bits(1);
+        let group = ReplicationGroupId(0);
+        let kind = ComponentKind::of::<DeltaComp>();
+        let message_1 = MessageId(0);
+        let message_2 = MessageId(1);
+        let message_3 = MessageId(2);
+        let tick_0 = Tick(9);
+        let tick_1 = Tick(10);
+        let tick_2 = Tick(12);
+        let component = DeltaComp(1);
+
+        delta_manager.store(entity, tick_0, kind, Ptr::from(&component), registry);
+        delta_manager.store(entity, tick_1, kind, Ptr::from(&component), registry);
+        delta_manager.store(entity, tick_1, kind, Ptr::from(&component), registry);
+        sender.group_channels.insert(group, GroupChannel::default());
+        sender.updates_message_id_to_group_id.insert(
+            message_2,
+            update_metadata(group, tick_2, vec![(entity, kind)]),
+        );
+        sender.updates_message_id_to_group_id.insert(
+            message_1,
+            update_metadata(group, tick_1, vec![(entity, kind)]),
+        );
+        sender.updates_message_id_to_group_id.insert(
+            message_3,
+            update_metadata(group, tick_1, vec![(entity, kind)]),
+        );
+
+        sender.handle_acks(
+            registry,
+            Some(&delta_manager),
+            &mut vec![message_2, message_1, message_3],
+        );
+
+        let group_channel = sender.group_channels.get(&group).unwrap();
+        assert_eq!(
+            group_channel.delta_ack_ticks.get(&(entity, kind)),
+            Some(&tick_2)
+        );
+        assert!(
+            delta_manager.get(entity, tick_0, kind).is_none(),
+            "older ack ticks that do not advance delta_ack_ticks must still reach DeltaManager"
+        );
+    }
+
+    #[test]
+    fn test_delta_ack_ticks_advance_across_tick_wrap() {
+        let (mut sender, _) = setup();
+        let app = app_with_delta_comp();
+        let registry = app.world().resource::<ComponentRegistry>();
+        let delta_manager = DeltaManager::default();
+        let entity = Entity::from_bits(1);
+        let group = ReplicationGroupId(0);
+        let kind = ComponentKind::of::<DeltaComp>();
+        let message_1 = MessageId(0);
+        let message_2 = MessageId(1);
+        let tick_1 = Tick(u16::MAX - 5);
+        let tick_2 = tick_1 + 15_i16;
+
+        sender.group_channels.insert(group, GroupChannel::default());
+        sender.updates_message_id_to_group_id.insert(
+            message_1,
+            update_metadata(group, tick_1, vec![(entity, kind)]),
+        );
+        sender.updates_message_id_to_group_id.insert(
+            message_2,
+            update_metadata(group, tick_2, vec![(entity, kind)]),
+        );
+
+        sender.handle_acks(
+            registry,
+            Some(&delta_manager),
+            &mut vec![message_1, message_2],
+        );
+
+        let group_channel = sender.group_channels.get(&group).unwrap();
+        assert_eq!(
+            group_channel.delta_ack_ticks.get(&(entity, kind)),
+            Some(&tick_2)
+        );
+    }
+
+    #[test]
+    fn test_delta_ack_ticks_keep_happy_path_ack_order() {
+        let (mut sender, _) = setup();
+        let app = app_with_delta_comp();
+        let registry = app.world().resource::<ComponentRegistry>();
+        let delta_manager = DeltaManager::default();
+        let entity = Entity::from_bits(1);
+        let group = ReplicationGroupId(0);
+        let kind = ComponentKind::of::<DeltaComp>();
+        let message_1 = MessageId(0);
+        let message_2 = MessageId(1);
+        let tick_1 = Tick(10);
+        let tick_2 = Tick(12);
+
+        sender.group_channels.insert(group, GroupChannel::default());
+        sender.updates_message_id_to_group_id.insert(
+            message_1,
+            update_metadata(group, tick_1, vec![(entity, kind)]),
+        );
+        sender.updates_message_id_to_group_id.insert(
+            message_2,
+            update_metadata(group, tick_2, vec![(entity, kind)]),
+        );
+
+        sender.handle_acks(
+            registry,
+            Some(&delta_manager),
+            &mut vec![message_1, message_2],
+        );
+
+        let group_channel = sender.group_channels.get(&group).unwrap();
+        assert_eq!(
+            group_channel.delta_ack_ticks.get(&(entity, kind)),
+            Some(&tick_2)
+        );
+    }
+
+    #[test]
+    fn test_reversed_delta_acks_keep_latest_base_for_next_delta() {
+        let (mut sender, mut transport) = setup();
+        let app = app_with_delta_comp();
+        let registry = app.world().resource::<ComponentRegistry>();
+        let delta_manager = DeltaManager::default();
+        let entity = Entity::from_bits(1);
+        let group = ReplicationGroupId(0);
+        let kind = ComponentKind::of::<DeltaComp>();
+        let mut remote_entity_map = RemoteEntityMap::default();
+        let mut message_ids = Vec::new();
+
+        sender.group_channels.insert(group, GroupChannel::default());
+
+        for tick_value in 1..=10 {
+            let tick = Tick(tick_value);
+            let component = DeltaComp(tick_value as i16);
+            delta_manager.store(entity, tick, kind, Ptr::from(&component), registry);
+            sender
+                .prepare_delta_component_update(
+                    entity,
+                    entity,
+                    group,
+                    kind,
+                    Ptr::from(&component),
+                    registry,
+                    &delta_manager,
+                    tick,
+                    &mut remote_entity_map,
+                )
+                .unwrap();
+            sender
+                .send_updates_messages(
+                    Entity::PLACEHOLDER,
+                    tick,
+                    BevyTick::new(u32::from(tick_value)),
+                    &mut transport,
+                    MessageNetId::default(),
+                    None,
+                )
+                .unwrap();
+            let message_id = MessageId(tick_value - 1);
+            assert!(
+                sender
+                    .updates_message_id_to_group_id
+                    .contains_key(&message_id)
+            );
+            message_ids.push(message_id);
+        }
+
+        let mut reverse_acks = message_ids.into_iter().rev().collect::<Vec<_>>();
+        sender.handle_acks(registry, Some(&delta_manager), &mut reverse_acks);
+        assert_eq!(
+            sender
+                .group_channels
+                .get(&group)
+                .unwrap()
+                .delta_ack_ticks
+                .get(&(entity, kind)),
+            Some(&Tick(10))
+        );
+
+        let tick = Tick(11);
+        let component = DeltaComp(11);
+        delta_manager.store(entity, tick, kind, Ptr::from(&component), registry);
+        sender
+            .prepare_delta_component_update(
+                entity,
+                entity,
+                group,
+                kind,
+                Ptr::from(&component),
+                registry,
+                &delta_manager,
+                tick,
+                &mut remote_entity_map,
+            )
+            .unwrap();
+
+        let update = sender
+            .group_channels
+            .get(&group)
+            .unwrap()
+            .pending_updates
+            .get(&entity)
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        let mut reader = Reader::from(update);
+        let delta = registry
+            .deserialize::<DeltaMessage<i16>>(&mut reader, &mut ReceiveEntityMap::default())
+            .unwrap();
+        assert_eq!(
+            delta.delta_type,
+            DeltaType::Normal {
+                previous_tick: Tick(10)
+            }
+        );
     }
 
     /// Test that in mode SinceLastSend, the `send_tick` is updated correctly:

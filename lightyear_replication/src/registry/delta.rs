@@ -571,7 +571,7 @@ mod tests {
     fn test_apply_diff() {
         let erased_fns = ErasedDeltaFns::new::<CompDelta, Vec<usize>>(None);
         let mut old_data = CompDelta(vec![1]);
-        let diff = vec![2];
+        let diff = vec![2_usize];
         unsafe { (erased_fns.apply_diff)(PtrMut::from(&mut old_data), Ptr::from(&diff)) };
         assert_eq!(old_data, CompDelta(vec![1, 2]));
     }
