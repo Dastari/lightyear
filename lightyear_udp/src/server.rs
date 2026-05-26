@@ -6,11 +6,9 @@ This crate provides abstractions for sending and receiving raw bytes over the ne
 
 extern crate alloc;
 
-use std::{
-    collections::VecDeque,
-    io::ErrorKind,
-    time::{Duration, Instant as StdInstant},
-};
+use alloc::collections::VecDeque;
+use core::{net::SocketAddr, time::Duration};
+use std::{io::ErrorKind, time::Instant as StdInstant};
 
 use bevy_app::{App, Plugin, PostUpdate, PreUpdate};
 use bevy_ecs::prelude::*;
@@ -22,7 +20,6 @@ use crate::UdpError;
 use aeronet_io::connection::{LocalAddr, PeerAddr};
 use bevy_platform::collections::{HashMap, hash_map::Entry};
 use bytes::{BufMut, BytesMut};
-use core::net::SocketAddr;
 use lightyear_core::time::Instant;
 use lightyear_link::prelude::{LinkOf, Server};
 use lightyear_link::{
@@ -142,6 +139,26 @@ impl ServerUdpPlugin {
         if let Ok(mut udp_io) = query.get_mut(trigger.entity) {
             info!("Server UDP socket closed");
             udp_io.socket = None;
+        }
+    }
+
+    fn unlink_link_of(
+        trigger: On<Unlink>,
+        link_of_query: Query<(&LinkOf, &PeerAddr), With<UdpLinkOfIO>>,
+        mut server_query: Query<&mut ServerUdpIo>,
+    ) {
+        let Ok((link_of, peer_addr)) = link_of_query.get(trigger.entity) else {
+            return;
+        };
+        let Ok(mut server_io) = server_query.get_mut(link_of.server) else {
+            return;
+        };
+        if server_io.connected_addresses.remove(&peer_addr.0).is_some() {
+            info!(
+                entity = ?trigger.entity,
+                address = %peer_addr.0,
+                "UDP server evicted peer address on Unlink"
+            );
         }
     }
 
@@ -330,7 +347,84 @@ impl Plugin for ServerUdpPlugin {
         }
         app.add_observer(Self::link);
         app.add_observer(Self::unlink);
+        app.add_observer(Self::unlink_link_of);
         app.add_systems(PreUpdate, Self::receive.in_set(LinkSystems::Receive));
         app.add_systems(PostUpdate, Self::send.in_set(LinkSystems::Send));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aeronet_io::connection::LocalAddr;
+    use core::net::SocketAddr;
+    use std::net::UdpSocket;
+
+    fn link_for_addr(app: &App, server_entity: Entity, address: SocketAddr) -> Entity {
+        let server_io = app.world().get::<ServerUdpIo>(server_entity).unwrap();
+        match server_io.connected_addresses.get(&address).unwrap() {
+            LinkOfStatus::Spawned(entity) => *entity,
+            LinkOfStatus::Spawning(entity) => {
+                panic!("expected spawned LinkOf, got spawning entity {entity:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn unlink_link_of_evicts_peer_address_for_reconnect() {
+        let mut app = App::new();
+        app.add_plugins(ServerUdpPlugin);
+        let server_entity = app
+            .world_mut()
+            .spawn((
+                ServerUdpIo::default(),
+                LocalAddr("127.0.0.1:0".parse().unwrap()),
+            ))
+            .id();
+
+        app.world_mut().trigger(LinkStart {
+            entity: server_entity,
+        });
+        app.update();
+        let server_addr = app
+            .world()
+            .get::<ServerUdpIo>(server_entity)
+            .unwrap()
+            .socket
+            .as_ref()
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let client_addr = client.local_addr().unwrap();
+
+        client.send_to(b"first", server_addr).unwrap();
+        app.update();
+        assert!(
+            app.world()
+                .get::<ServerUdpIo>(server_entity)
+                .unwrap()
+                .connected_addresses
+                .contains_key(&client_addr)
+        );
+        let first_link = link_for_addr(&app, server_entity, client_addr);
+
+        app.world_mut().trigger(Unlink {
+            entity: first_link,
+            reason: "test".into(),
+        });
+        app.update();
+        assert!(
+            !app.world()
+                .get::<ServerUdpIo>(server_entity)
+                .unwrap()
+                .connected_addresses
+                .contains_key(&client_addr)
+        );
+
+        client.send_to(b"second", server_addr).unwrap();
+        app.update();
+        let second_link = link_for_addr(&app, server_entity, client_addr);
+        assert_ne!(first_link, second_link);
     }
 }

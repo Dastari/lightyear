@@ -11,9 +11,10 @@
 //!
 //! It also includes server-specific UDP IO handling when the "server" feature is enabled.
 
-use std::{collections::VecDeque, io::ErrorKind, net::UdpSocket};
+extern crate alloc;
 
 use aeronet_io::connection::{LocalAddr, PeerAddr};
+use alloc::collections::VecDeque;
 use bevy_app::prelude::*;
 use bevy_ecs::prelude::*;
 use bytes::{BufMut, BytesMut};
@@ -21,6 +22,7 @@ use lightyear_core::time::Instant;
 use lightyear_link::{
     Link, LinkPlugin, LinkReceiveSystems, LinkStart, LinkSystems, Linked, Linking, Unlink, Unlinked,
 };
+use std::{io::ErrorKind, net::UdpSocket};
 use tracing::{debug, error, info, trace};
 
 /// Provides server-specific UDP IO functionalities.
