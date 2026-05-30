@@ -24,13 +24,20 @@ impl Plugin for WebTransportClientPlugin {
 /// WebTransport session implementation which acts as a dedicated client,
 /// connecting to a target endpoint.
 ///
-/// The [`PeerAddr`] component will be used to find the server_addr.
+/// When [`server_host`](Self::server_host) is `Some`, it is used to build the
+/// `https://…` connect URL, allowing a DNS hostname (the browser/wtransport
+/// resolves it). Otherwise the [`PeerAddr`] component supplies the server
+/// address, which must already be a resolved IP.
 ///
 /// Use [`WebTransportClient::connect`] to start a connection.
 #[derive(Debug, Component)]
 #[require(Link)]
 pub struct WebTransportClientIo {
     pub certificate_digest: String,
+    /// Optional `host[:port]` for the connect URL. Takes precedence over
+    /// [`PeerAddr`] and may be a DNS name. `None` preserves the IP-only
+    /// [`PeerAddr`] behaviour.
+    pub server_host: Option<String>,
 }
 
 impl WebTransportClientPlugin {
@@ -43,11 +50,23 @@ impl WebTransportClientPlugin {
         mut commands: Commands,
     ) -> Result {
         if let Ok((entity, client, peer_addr)) = query.get(trigger.entity) {
-            let server_addr = peer_addr.ok_or(WebTransportError::PeerAddrMissing)?.0;
+            // Prefer an explicit host (may be a DNS name); otherwise fall back to
+            // the PeerAddr socket address, which must be a resolved IP.
+            let server_url = match client
+                .server_host
+                .as_ref()
+                .map(|host| host.trim())
+                .filter(|host| !host.is_empty())
+            {
+                Some(host) => format!("https://{host}"),
+                None => {
+                    let server_addr = peer_addr.ok_or(WebTransportError::PeerAddrMissing)?.0;
+                    format!("https://{server_addr}")
+                }
+            };
             let digest = client.certificate_digest.clone();
             commands.queue(move |world: &mut World| -> Result {
                 let config = Self::client_config(digest)?;
-                let server_url = format!("https://{server_addr}");
                 let target = {
                     #[cfg(target_family = "wasm")]
                     {
