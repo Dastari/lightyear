@@ -68,7 +68,14 @@ pub(crate) mod std {
         /// This doesn't allocate and just increases some reference counts. O(1) cost.
         pub fn split_len(&mut self, len: usize) -> Bytes {
             let current_pos = self.0.position() as usize;
-            let new_pos = current_pos + len;
+            // Defensive bound: never slice past the end of the buffer. The
+            // network-receive callers validate `len <= remaining()` and turn an
+            // over-long length prefix into a decode error before reaching here;
+            // this clamp guarantees a stray or hostile `len` can never panic the
+            // process. A single truncated packet used to crash the whole server
+            // via the unchecked `current_pos + len` slice below.
+            let buf_len = self.0.get_ref().len();
+            let new_pos = current_pos.saturating_add(len).min(buf_len);
             // slice off the subset into a separate Bytes
             let bytes = self.0.get_ref().slice(current_pos..new_pos);
             // increment the position
@@ -170,7 +177,14 @@ pub(crate) mod no_std {
         /// This doesn't allocate and just increases some reference counts. O(1) cost.
         pub fn split_len(&mut self, len: usize) -> Bytes {
             let current_pos = self.0.position() as usize;
-            let new_pos = current_pos + len;
+            // Defensive bound: never slice past the end of the buffer. The
+            // network-receive callers validate `len <= remaining()` and turn an
+            // over-long length prefix into a decode error before reaching here;
+            // this clamp guarantees a stray or hostile `len` can never panic the
+            // process. A single truncated packet used to crash the whole server
+            // via the unchecked `current_pos + len` slice below.
+            let buf_len = self.0.get_ref().len();
+            let new_pos = current_pos.saturating_add(len).min(buf_len);
             // slice off the subset into a separate Bytes
             let bytes = self.0.get_ref().slice(current_pos..new_pos);
             // increment the position

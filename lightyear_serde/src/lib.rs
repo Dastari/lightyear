@@ -132,6 +132,12 @@ impl ToBytes for Bytes {
         Self: Sized,
     {
         let len = buffer.read_varint()? as usize;
+        // Reject a length prefix that claims more bytes than remain (a truncated
+        // or hostile packet) instead of slicing out of bounds and panicking the
+        // whole server task.
+        if len > buffer.remaining() {
+            return Err(SerializationError::InvalidValue);
+        }
         let bytes = buffer.split_len(len);
         Ok(bytes)
     }
@@ -218,8 +224,12 @@ impl<M: ToBytes> ToBytes for Vec<M> {
         Self: Sized,
     {
         let len = buffer.read_varint()? as usize;
-        // TODO: if we know the MIN_LEN we can preallocate
-        let mut vec = Vec::with_capacity(len);
+        // Do not pre-allocate from an unvalidated length prefix: a few wire
+        // bytes can claim a huge element count and trigger a multi-exabyte
+        // allocation (remote OOM). Each element is at least one byte on the
+        // wire, so cap the reservation at the bytes that actually remain; the
+        // loop still errors out via `from_bytes` once the buffer is drained.
+        let mut vec = Vec::with_capacity(len.min(buffer.remaining()));
         for _ in 0..len {
             vec.push(M::from_bytes(buffer)?);
         }
@@ -251,8 +261,10 @@ impl<K: ToBytes + Eq + Hash, V: ToBytes, S: Default + BuildHasher> ToBytes for H
         Self: Sized,
     {
         let len = buffer.read_varint()? as usize;
-        // TODO: if we know the MIN_LEN we can preallocate
-        let mut res = HashMap::with_capacity_and_hasher(len, S::default());
+        // Cap the up-front reservation at the remaining byte count so a hostile
+        // length prefix can't trigger a giant allocation (remote OOM); a
+        // key+value pair is at least two bytes on the wire.
+        let mut res = HashMap::with_capacity_and_hasher(len.min(buffer.remaining()), S::default());
         for _ in 0..len {
             let key = K::from_bytes(buffer)?;
             let value = V::from_bytes(buffer)?;
@@ -325,5 +337,49 @@ mod tests {
         assert_eq!(a, read_a);
         assert_eq!(b, read_b);
         assert_eq!(c, read_c);
+    }
+
+    // --- Hardening regression tests ---
+    // A malformed length prefix (truncated payload, or a tiny packet claiming a
+    // huge element count) must return a decode error, never panic or attempt a
+    // giant allocation. This is the crash class that took the server down when
+    // an external host reconnected to the game port and sent a truncated frame.
+
+    #[test]
+    fn bytes_from_truncated_length_prefix_errors() {
+        // Claim 100 bytes of payload but provide only 3.
+        let mut writer = Writer::with_capacity(8);
+        writer.write_varint(100).unwrap();
+        let mut buf = writer.to_bytes().to_vec();
+        buf.extend_from_slice(&[1, 2, 3]);
+        let mut reader = Reader::from(buf);
+        assert!(
+            Bytes::from_bytes(&mut reader).is_err(),
+            "truncated Bytes length prefix must error, not slice out of bounds"
+        );
+    }
+
+    #[test]
+    fn vec_from_oversized_length_prefix_errors_without_oom() {
+        // A few wire bytes claim ~4 billion elements with no element bytes
+        // following: must not pre-allocate, must error once the buffer drains.
+        let mut writer = Writer::with_capacity(16);
+        writer.write_varint(u32::MAX as u64).unwrap();
+        let mut reader = Reader::from(writer.to_bytes());
+        assert!(
+            Vec::<u8>::from_bytes(&mut reader).is_err(),
+            "oversized Vec length prefix must error, not OOM"
+        );
+    }
+
+    #[test]
+    fn map_from_oversized_length_prefix_errors_without_oom() {
+        let mut writer = Writer::with_capacity(16);
+        writer.write_varint(u32::MAX as u64).unwrap();
+        let mut reader = Reader::from(writer.to_bytes());
+        assert!(
+            HashMap::<u8, u8>::from_bytes(&mut reader).is_err(),
+            "oversized HashMap length prefix must error, not OOM"
+        );
     }
 }

@@ -996,13 +996,18 @@ impl GroupChannel {
 
             // removals
             actions.remove.into_iter().for_each(|component_net_id| {
-                component_registry.remove(
+                if let Err(e) = component_registry.remove(
                     component_net_id,
                     &mut buffered_entity,
                     predicted,
                     interpolated,
                     remote_tick,
-                );
+                ) {
+                    error!(
+                        "could not remove a component (net_id {:?}) from entity {:?}: {:?}",
+                        component_net_id, local_entity, e
+                    );
+                }
             });
 
             buffered_entity.apply();

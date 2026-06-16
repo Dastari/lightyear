@@ -165,21 +165,30 @@ impl ComponentRegistry {
         predicted: bool,
         interpolated: bool,
         tick: Tick,
-    ) {
-        let kind = self.kind_map.kind(net_id).expect("unknown component kind");
+    ) -> Result<(), ComponentError> {
+        // `net_id` is attacker-controlled (it comes straight off the wire in a
+        // replication "remove" action). Look it up with checked fallbacks
+        // instead of `.expect()` so an unknown/out-of-range component id is a
+        // handled decode error, not a panic that takes down the whole server.
+        let _ = tick;
+        let kind = self
+            .kind_map
+            .kind(net_id)
+            .ok_or(ComponentError::NotRegistered)?;
         let replication_metadata = self
             .component_metadata_map
             .get(kind)
-            .expect("the component is not part of the protocol")
+            .ok_or(ComponentError::NotRegistered)?
             .replication
             .as_ref()
-            .expect("the component does not have replication metadata");
+            .ok_or(ComponentError::MissingReplicationFns)?;
         let remove_fn = replication_metadata
             .remove
-            .expect("the component does not have a remove function");
+            .ok_or(ComponentError::MissingReplicationFns)?;
         let synced = (predicted && replication_metadata.predicted)
             || (interpolated && replication_metadata.interpolated);
         remove_fn(self, entity_mut, synced);
+        Ok(())
     }
 
     /// Prepare for a component being removed
