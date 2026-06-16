@@ -207,7 +207,14 @@ impl TransportPlugin {
                         Ok::<(), TransportError>(())
                     })
                     .inspect_err(|e| {
-                        error!("Error processing packet: {e:?}");
+                        // A malformed / truncated / hostile packet is expected
+                        // adversarial input, not a server fault. Count it (the
+                        // metric is the detection signal, surfaced on the
+                        // dashboard) and log only at debug so a flood of bad
+                        // packets can't spam the logs.
+                        #[cfg(feature = "metrics")]
+                        metrics::counter!("transport/recv_decode_errors").increment(1);
+                        debug!("dropping malformed inbound packet: {e:?}");
                     })
                     .ok();
 
