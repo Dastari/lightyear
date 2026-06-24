@@ -70,7 +70,7 @@ pub(crate) fn update_confirmed_history<C: Component + Clone>(
         // Seed on first sync with the second-oldest (or oldest if that's all we have) so
         // interpolate()'s first run has a sensible starting value while the blend warms up.
         if !present && let Some((_, value)) = history.end().or(history.start()) {
-            commands.entity(entity).insert(value.clone());
+            commands.entity(entity).try_insert(value.clone());
         }
 
         let idle_value = match history.newest() {
@@ -93,7 +93,7 @@ pub(crate) fn update_confirmed_history<C: Component + Clone>(
             //  component started getting updated so that we know exactly which tick to
             //  interpolate from! Using `current_interpolate_tick` here is a proxy.
             history.push(current_interpolate_tick, value.clone());
-            commands.entity(entity).insert(value);
+            commands.entity(entity).try_insert(value);
         }
     }
 }
