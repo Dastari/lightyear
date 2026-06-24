@@ -16,6 +16,7 @@ use tracing::trace;
 use tracing::{Level, instrument};
 
 pub const MAX_PACKET_SIZE: usize = 1200;
+pub const MAX_UNFRAGMENTED_PAYLOAD_SIZE: usize = FRAGMENT_SIZE;
 
 pub type Payload = Vec<u8>;
 
@@ -708,6 +709,89 @@ mod tests {
             contents.get(channel_id3).unwrap(),
             &vec![small_bytes.clone()]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn fragmented_packets_never_exceed_max_packet_size() -> Result<(), PacketError> {
+        let channel_registry = get_channel_registry();
+        let mut manager = PacketBuilder::new(1.5);
+        let channel_kind = ChannelKind::of::<Channel1>();
+        let channel_id = channel_registry.get_net_from_kind(&channel_kind).unwrap();
+
+        let bytes = Bytes::from(vec![9u8; FRAGMENT_SIZE + 1]);
+        let fragments = FragmentSender::new().build_fragments(MessageId(1024), bytes);
+
+        let packets = manager.build_packets(
+            Duration::default(),
+            Tick(0),
+            vec![],
+            vec![(*channel_id, VecDeque::from(fragments))],
+        )?;
+
+        assert!(!packets.is_empty());
+        for packet in packets {
+            assert!(
+                packet.payload.len() <= MAX_PACKET_SIZE,
+                "fragment packet exceeded MTU: {} > {}",
+                packet.payload.len(),
+                MAX_PACKET_SIZE
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fragmented_packets_fit_with_two_byte_channel_id() -> Result<(), PacketError> {
+        let mut manager = PacketBuilder::new(1.5);
+        let bytes = Bytes::from(vec![9u8; FRAGMENT_SIZE + 1]);
+        let fragments = FragmentSender::new().build_fragments(MessageId(1024), bytes);
+
+        let packets = manager.build_packets(
+            Duration::default(),
+            Tick(0),
+            vec![],
+            vec![(64, VecDeque::from(fragments))],
+        )?;
+
+        assert!(!packets.is_empty());
+        for packet in packets {
+            assert!(
+                packet.payload.len() <= MAX_PACKET_SIZE,
+                "fragment packet exceeded MTU: {} > {}",
+                packet.payload.len(),
+                MAX_PACKET_SIZE
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fragmented_packets_fit_with_many_fragments() -> Result<(), PacketError> {
+        let channel_registry = get_channel_registry();
+        let mut manager = PacketBuilder::new(1.5);
+        let channel_kind = ChannelKind::of::<Channel1>();
+        let channel_id = channel_registry.get_net_from_kind(&channel_kind).unwrap();
+
+        let bytes = Bytes::from(vec![9u8; FRAGMENT_SIZE * 64 + 1]);
+        let fragments = FragmentSender::new().build_fragments(MessageId(1024), bytes);
+
+        let packets = manager.build_packets(
+            Duration::default(),
+            Tick(0),
+            vec![],
+            vec![(*channel_id, VecDeque::from(fragments))],
+        )?;
+
+        assert!(!packets.is_empty());
+        for packet in packets {
+            assert!(
+                packet.payload.len() <= MAX_PACKET_SIZE,
+                "fragment packet exceeded MTU: {} > {}",
+                packet.payload.len(),
+                MAX_PACKET_SIZE
+            );
+        }
         Ok(())
     }
 
