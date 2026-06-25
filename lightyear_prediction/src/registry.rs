@@ -454,7 +454,7 @@ pub trait PredictionAppRegistrationExt {
     /// Enable rollbacks for a component that is not networked.
     fn add_rollback<C: SyncComponent>(&mut self) -> ComponentRegistration<'_, C>;
 
-    fn add_resource_rollback<R: Resource + Clone>(&mut self);
+    fn add_resource_rollback<R: Resource<Mutability = bevy_ecs::component::Mutable> + Clone>(&mut self);
 }
 
 impl PredictionAppRegistrationExt for App {
@@ -471,7 +471,7 @@ impl PredictionAppRegistrationExt for App {
         ComponentRegistration::<C>::new(self)
     }
 
-    fn add_resource_rollback<R: Resource + Clone>(&mut self) {
+    fn add_resource_rollback<R: Resource<Mutability = bevy_ecs::component::Mutable> + Clone>(&mut self) {
         // skip if there is no PredictionRegistry (i.e. the PredictionPlugin wasn't added)
         if self.world().get_resource::<PredictionRegistry>().is_none() {
             return;

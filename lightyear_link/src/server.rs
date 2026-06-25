@@ -61,7 +61,7 @@ impl Server {
 // because we don't want to despawn Server if there are no more LinkOfs.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Reflect)]
 #[component(on_insert = LinkOf::on_insert_hook)]
-#[component(on_replace = LinkOf::on_replace)]
+#[component(on_discard = LinkOf::on_replace)]
 pub struct LinkOf {
     pub server: Entity,
 }

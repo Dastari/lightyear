@@ -262,7 +262,9 @@ pub(crate) fn update_visual_interpolation_status<
         //     );
         //     continue;
         // }
-        interpolate_status.current_value = Some(component.clone());
+        // Bevy 0.19: `Ref` now implements `Clone`, so `component.clone()` would clone the `Ref`
+        // wrapper, not `C`. Deref first to clone the inner component value.
+        interpolate_status.current_value = Some((*component).clone());
         trace!(
             ?interpolate_status,
             "updating interpolate status current_value"

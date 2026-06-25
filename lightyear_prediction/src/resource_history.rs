@@ -9,7 +9,34 @@ use lightyear_sync::prelude::client::InputTimelineConfig;
 #[allow(unused_imports)]
 use tracing::{info, trace};
 
-pub(crate) type ResourceHistory<R> = HistoryBuffer<R>;
+/// Resource-rollback history.
+///
+/// In Bevy 0.19 `#[derive(Resource)]` implies a `Component` impl with SparseSet storage and an
+/// auto-required `IsResource` marker, so a resource history and a per-entity component history can
+/// no longer be the same type (the latter must stay a plain Table component without `IsResource`).
+/// This is therefore a distinct newtype around [`HistoryBuffer`]; it derefs to the underlying
+/// buffer so all the call sites are unchanged.
+#[derive(Resource)]
+pub(crate) struct ResourceHistory<R: Send + Sync + 'static>(pub(crate) HistoryBuffer<R>);
+
+impl<R: Send + Sync + 'static> Default for ResourceHistory<R> {
+    fn default() -> Self {
+        Self(HistoryBuffer::default())
+    }
+}
+
+impl<R: Send + Sync + 'static> core::ops::Deref for ResourceHistory<R> {
+    type Target = HistoryBuffer<R>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<R: Send + Sync + 'static> core::ops::DerefMut for ResourceHistory<R> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 /// If there is a TickEvent and the client tick suddenly changes, we need
 /// to update the ticks in the history buffer.

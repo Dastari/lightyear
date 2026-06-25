@@ -365,7 +365,7 @@ impl ReplicationTargetT for lightyear_core::interpolation::Interpolated {
 #[derive(Component, Clone, Default, Debug, PartialEq, Reflect)]
 #[require(ReplicationState)]
 #[component(on_insert = ReplicationTarget::<T>::on_insert)]
-#[component(on_replace = ReplicationTarget::<T>::on_replace)]
+#[component(on_discard = ReplicationTarget::<T>::on_replace)]
 pub struct ReplicationTarget<T: ReplicationTargetT> {
     mode: ReplicationMode,
     #[reflect(ignore)]
@@ -759,7 +759,7 @@ impl Default for PerSenderReplicationState {
 #[require(ReplicationGroup)]
 #[require(ReplicationState)]
 #[component(on_insert = Replicate::on_insert)]
-#[component(on_replace = Replicate::on_replace)]
+#[component(on_discard = Replicate::on_replace)]
 #[reflect(Component)]
 pub struct Replicate {
     /// Defines which [`ReplicationSenders`](ReplicationSender) this entity will be replicated to

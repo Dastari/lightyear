@@ -90,7 +90,7 @@ pub fn add_non_networked_rollback_systems<C: SyncComponent>(app: &mut App) {
 /// As a side note, the `Time<Fixed>` resource is already rollbacked internally
 /// by lightyear so that it can be used accurately within systems within the
 /// `FixedMain` schedule during a rollback.
-pub fn add_resource_rollback_systems<R: Resource + Clone>(app: &mut App) {
+pub fn add_resource_rollback_systems<R: Resource<Mutability = bevy_ecs::component::Mutable> + Clone>(app: &mut App) {
     // TODO: add these registrations if the type is reflect
     // app.register_type::<HistoryState<R>>();
     // app.register_type::<ResourceHistory<R>>();

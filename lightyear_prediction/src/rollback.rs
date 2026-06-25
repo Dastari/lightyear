@@ -686,7 +686,7 @@ pub(crate) fn prepare_rollback<C: SyncComponent>(
 }
 
 // Revert `resource` to its value at the tick that the incoming rollback will rollback to.
-pub(crate) fn prepare_rollback_resource<R: Resource + Clone>(
+pub(crate) fn prepare_rollback_resource<R: Resource<Mutability = bevy_ecs::component::Mutable> + Clone>(
     mut commands: Commands,
     prediction_manager: Single<&PredictionManager, With<Rollback>>,
     resource: Option<ResMut<R>>,

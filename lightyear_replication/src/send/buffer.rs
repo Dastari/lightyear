@@ -764,7 +764,10 @@ pub(crate) fn buffer_component_removed(
             .get(*sender_entity)
             .is_some_and(|s| s.visibility.is_visible(has_network_visibility))
     });
-    manager_query.par_iter_many_unique_mut(senders).for_each(
+    // Bevy 0.19: `Archetype` is no longer `Sync` (`RequiredComponentConstructor` holds a `!Sync`
+    // `Arc<dyn Fn>`), so capturing `entity_ref: FilteredEntityRef` in a parallel `for_each` closure
+    // breaks the `Sync` bound. Component removal is an infrequent path, so iterate sequentially.
+    manager_query.iter_many_unique_mut(senders).for_each(
         |(sender_entity, mut sender, manager)| {
             // convert the entity to a network entity (possibly mapped)
             let entity = manager.entity_mapper.to_remote(entity);
