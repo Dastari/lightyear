@@ -1,6 +1,8 @@
 # Bevy 0.19 Migration Plan — lightyear-sidereal fork
 
-Status: **PLAN / not yet started**
+Status: **DONE** — fork compiles fully on Bevy 0.19 (G1 Sidereal surface + G2 full workspace green);
+G3 validated (`lightyear_tests`: 94/104 pass, **zero regressions** vs the 0.18 baseline — the 9 failures
+pre-date the migration). Game migration handed off in `GAME_BEVY_0.19_HANDOFF.md`.
 Authored: 2026-06-25
 Scope of this document: the **fork only** (`/root/lightyear-sidereal`). The companion
 handoff for the game (`/root/sidereal`) is produced *from* this migration — see §9.
