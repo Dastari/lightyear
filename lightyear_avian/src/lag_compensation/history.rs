@@ -88,7 +88,11 @@ impl Plugin for LagCompensationPlugin {
                 PhysicsStepSystems::Solver,
                 // the history must be updated before the SpatialQuery is updated
                 LagCompensationSystems::UpdateHistory.ambiguous_with(PhysicsStepSystems::Sleeping),
-                PhysicsStepSystems::SpatialQuery,
+                // Avian 0.7 moved spatial queries out of `PhysicsStepSystems` into the dedicated
+                // `SpatialQuerySystems` set, which runs in `FixedPostUpdate` (not `PhysicsSchedule`).
+                // This ordering edge is now effectively a no-op here; lag-compensation history vs
+                // spatial-query ordering needs runtime revalidation under Avian 0.7. TODO(phase-3).
+                SpatialQuerySystems,
                 // collisions must run after the SpatialQuery has been updated
                 // NOTE: we set it as ambiguous with Finalize, but maybe we should run before?
                 LagCompensationSystems::Collisions.ambiguous_with(PhysicsStepSystems::Finalize),

@@ -94,7 +94,11 @@ impl ExampleClient {
                             "".to_string()
                         }
                     };
-                    entity_mut.insert(WebTransportClientIo { certificate_digest });
+                    entity_mut.insert(WebTransportClientIo {
+                        certificate_digest,
+                        // fork patch a1eece4c: optional DNS host; examples connect by PeerAddr.
+                        server_host: None,
+                    });
                 }
                 ClientTransports::WebSocket => {
                     add_netcode(&mut entity_mut)?;

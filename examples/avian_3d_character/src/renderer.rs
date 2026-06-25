@@ -57,7 +57,8 @@ fn init(mut commands: Commands) {
 
     commands.spawn((
         PointLight {
-            shadows_enabled: true,
+            // Bevy 0.19 renamed PointLight::shadows_enabled -> shadow_maps_enabled.
+            shadow_maps_enabled: true,
             ..default()
         },
         Transform::from_xyz(4.0, 8.0, 4.0),
