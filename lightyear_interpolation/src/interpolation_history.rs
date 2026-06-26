@@ -88,6 +88,7 @@ impl<C: Component + Clone> ConfirmedHistory<C> {
         interpolation_tick: Tick,
         interpolation_overstep: f32,
         interpolation_registry: &InterpolationRegistry,
+        clamp_overshoot: bool,
     ) -> Option<C> {
         let (start_tick, start) = self.start()?;
         // It is possible that the interpolation_tick is early compared to the updates
@@ -98,14 +99,16 @@ impl<C: Component + Clone> ConfirmedHistory<C> {
             return None;
         }
         let (end_tick, end) = self.end()?;
-        // Clamp (rather than extrapolate past end_tick): bounds jerk to
-        // |newest - behind| on direction reversals. Extrapolation would look smoother
-        // in pure continuous motion but amplify the mismatch when the server path
-        // diverges from the extrapolated one. Revisit if we add velocity-aware
-        // interpolation with reconciliation.
-        let fraction = (((interpolation_tick - start_tick) as f32 + interpolation_overstep)
-            / (end_tick - start_tick) as f32)
-            .clamp(0.0, 1.0);
+        let raw_fraction = ((interpolation_tick - start_tick) as f32 + interpolation_overstep)
+            / (end_tick - start_tick) as f32;
+        // Default (upstream): extrapolate past end_tick. `clamp_overshoot` (convergent mode) clamps
+        // at the newest keyframe instead, bounding jerk to |newest - behind| on direction reversals
+        // at the cost of looking less smooth in pure continuous motion.
+        let fraction = if clamp_overshoot {
+            raw_fraction.clamp(0.0, 1.0)
+        } else {
+            raw_fraction
+        };
         trace!(
             ?start_tick,
             ?end_tick,
@@ -279,7 +282,7 @@ mod tests {
         history.push(Tick(20), TestComp(10.0));
 
         assert_eq!(
-            history.interpolate(Tick(15), 0.0, &registry),
+            history.interpolate(Tick(15), 0.0, &registry, true),
             Some(TestComp(5.0))
         );
     }
@@ -293,8 +296,8 @@ mod tests {
         let mut history = ConfirmedHistory::<TestComp>::default();
         history.push(Tick(10), TestComp(42.0));
 
-        assert_eq!(history.interpolate(Tick(10), 0.0, &registry), None);
-        assert_eq!(history.interpolate(Tick(50), 0.5, &registry), None);
+        assert_eq!(history.interpolate(Tick(10), 0.0, &registry, true), None);
+        assert_eq!(history.interpolate(Tick(50), 0.5, &registry, true), None);
     }
 
     #[test]
@@ -305,11 +308,11 @@ mod tests {
         history.push(Tick(20), TestComp(10.0));
 
         assert_eq!(
-            history.interpolate(Tick(30), 0.0, &registry),
+            history.interpolate(Tick(30), 0.0, &registry, true),
             Some(TestComp(10.0))
         );
         assert_eq!(
-            history.interpolate(Tick(20), 0.5, &registry),
+            history.interpolate(Tick(20), 0.5, &registry, true),
             Some(TestComp(10.0))
         );
     }
@@ -321,7 +324,7 @@ mod tests {
         history.push(Tick(10), TestComp(0.0));
         history.push(Tick(20), TestComp(10.0));
 
-        assert_eq!(history.interpolate(Tick(5), 0.0, &registry), None);
+        assert_eq!(history.interpolate(Tick(5), 0.0, &registry, true), None);
     }
 
     #[test]
@@ -329,6 +332,6 @@ mod tests {
         let registry = registry();
         let history = ConfirmedHistory::<TestComp>::default();
 
-        assert_eq!(history.interpolate(Tick(0), 0.0, &registry), None);
+        assert_eq!(history.interpolate(Tick(0), 0.0, &registry, true), None);
     }
 }

@@ -37,6 +37,11 @@ pub struct InterpolationConfig {
     /// Set to 0.0 if you want to only use the Delay
     pub send_interval_ratio: f32,
     pub sync: SyncConfig,
+    /// Opt-in: keep the confirmed-interpolation history "convergent" — a multi-keyframe smart drain
+    /// that walks the blend anchor through bursty arrivals, an idle-rebase that collapses to the
+    /// current tick when updates stall, and clamp-at-newest instead of extrapolating past the
+    /// freshest snapshot. Defaults to `false` (upstream: pop-oldest drain + extrapolation).
+    pub convergent_history: bool,
 }
 
 impl Default for InterpolationConfig {
@@ -45,6 +50,7 @@ impl Default for InterpolationConfig {
             min_delay: Duration::from_millis(5),
             send_interval_ratio: 1.7,
             sync: SyncConfig::default(),
+            convergent_history: false,
         }
     }
 }
@@ -57,6 +63,12 @@ impl InterpolationConfig {
 
     pub fn with_send_interval_ratio(mut self, send_interval_ratio: f32) -> Self {
         self.send_interval_ratio = send_interval_ratio;
+        self
+    }
+
+    /// Enable convergent interpolation history (see [`Self::convergent_history`]).
+    pub fn with_convergent_history(mut self, convergent_history: bool) -> Self {
+        self.convergent_history = convergent_history;
         self
     }
 

@@ -1,6 +1,6 @@
 use crate::interpolation_history::ConfirmedHistory;
 use crate::registry::InterpolationRegistry;
-use crate::timeline::InterpolationTimeline;
+use crate::timeline::{InterpolationConfig, InterpolationTimeline};
 use bevy_ecs::component::Mutable;
 use bevy_ecs::prelude::Has;
 use bevy_ecs::prelude::*;
@@ -44,12 +44,15 @@ pub fn interpolation_fraction(start: Tick, end: Tick, current: Tick, overstep: f
 pub(crate) fn update_confirmed_history<C: Component + Clone>(
     // TODO: handle multiple interpolation timelines
     // TODO: exclude host-server
-    interpolation: Single<&InterpolationTimeline, With<IsSynced<InterpolationTimeline>>>,
+    interpolation: Single<
+        (&InterpolationTimeline, &InterpolationConfig),
+        With<IsSynced<InterpolationTimeline>>,
+    >,
     tick_duration: Res<TickDuration>,
     mut query: Query<(Entity, &mut ConfirmedHistory<C>, Has<C>)>,
     mut commands: Commands,
 ) {
-    let timeline = interpolation.into_inner();
+    let (timeline, config) = interpolation.into_inner();
 
     // how many ticks between each interpolation
     let send_interval_delta_tick = (SEND_INTERVAL_TICK_FACTOR
@@ -59,41 +62,68 @@ pub(crate) fn update_confirmed_history<C: Component + Clone>(
 
     let current_interpolate_tick = timeline.now().tick();
     for (entity, mut history, present) in query.iter_mut() {
-        while history.len() >= 3
-            && history
-                .get_nth(1)
-                .is_some_and(|(t, _)| t <= current_interpolate_tick)
-        {
-            history.pop();
-        }
-
-        // Seed on first sync with the second-oldest (or oldest if that's all we have) so
-        // interpolate()'s first run has a sensible starting value while the blend warms up.
-        if !present && let Some((_, value)) = history.end().or(history.start()) {
-            commands.entity(entity).try_insert(value.clone());
-        }
-
-        let idle_value = match history.newest() {
-            Some((newest_tick, value))
-                if (current_interpolate_tick - newest_tick) >= send_interval_delta_tick =>
+        if config.convergent_history {
+            // Convergent mode (opt-in): a smart drain walks the blend anchor through bursty
+            // arrivals, and an idle rebase collapses the buffer to the current tick when updates
+            // stall (instead of staying clamped on a stale newest forever).
+            while history.len() >= 3
+                && history
+                    .get_nth(1)
+                    .is_some_and(|(t, _)| t <= current_interpolate_tick)
             {
-                Some(value.clone())
+                history.pop();
             }
-            _ => None,
-        };
-        if let Some(value) = idle_value {
-            trace!(
-                ?entity,
-                ?current_interpolate_tick,
-                "rebase idle keyframe to current tick. Kind = {:?}",
-                DebugName::type_name::<C>()
-            );
-            while history.pop().is_some() {}
-            // TODO: the correct behaviour would be to know the exact tick at which the
-            //  component started getting updated so that we know exactly which tick to
-            //  interpolate from! Using `current_interpolate_tick` here is a proxy.
-            history.push(current_interpolate_tick, value.clone());
-            commands.entity(entity).try_insert(value);
+
+            // Seed on first sync with the second-oldest (or oldest if that's all we have) so
+            // interpolate()'s first run has a sensible starting value while the blend warms up.
+            if !present && let Some((_, value)) = history.end().or(history.start()) {
+                commands.entity(entity).try_insert(value.clone());
+            }
+
+            let idle_value = match history.newest() {
+                Some((newest_tick, value))
+                    if (current_interpolate_tick - newest_tick) >= send_interval_delta_tick =>
+                {
+                    Some(value.clone())
+                }
+                _ => None,
+            };
+            if let Some(value) = idle_value {
+                trace!(
+                    ?entity,
+                    ?current_interpolate_tick,
+                    "rebase idle keyframe to current tick. Kind = {:?}",
+                    DebugName::type_name::<C>()
+                );
+                while history.pop().is_some() {}
+                // TODO: the correct behaviour would be to know the exact tick at which the
+                //  component started getting updated so that we know exactly which tick to
+                //  interpolate from! Using `current_interpolate_tick` here is a proxy.
+                history.push(current_interpolate_tick, value.clone());
+                commands.entity(entity).try_insert(value);
+            }
+        } else {
+            // Upstream default: interpolate between the two oldest keyframes; pop the oldest once
+            // the interpolation tick has passed it. If only one stale keyframe remains, rebase it
+            // forward to the current tick so we don't interpolate from a very old value.
+            if let Some((history_tick, end_value)) = history.end() {
+                if !present {
+                    commands.entity(entity).try_insert(end_value.clone());
+                }
+                if current_interpolate_tick >= history_tick {
+                    history.pop();
+                }
+            }
+            if history.len() == 1
+                && let Some((history_tick, val)) = history.start()
+                && (current_interpolate_tick - history_tick) >= send_interval_delta_tick
+            {
+                if !present {
+                    commands.entity(entity).try_insert(val.clone());
+                }
+                let (_, val) = history.pop().unwrap();
+                history.push(current_interpolate_tick, val);
+            }
         }
     }
 }
@@ -101,9 +131,13 @@ pub(crate) fn update_confirmed_history<C: Component + Clone>(
 /// Apply interpolation for the component
 pub(crate) fn interpolate<C: Component<Mutability = Mutable> + Clone>(
     interpolation_registry: Res<InterpolationRegistry>,
-    timeline: Single<&InterpolationTimeline, With<IsSynced<InterpolationTimeline>>>,
+    interpolation: Single<
+        (&InterpolationTimeline, &InterpolationConfig),
+        With<IsSynced<InterpolationTimeline>>,
+    >,
     mut query: Query<(&mut C, &ConfirmedHistory<C>)>,
 ) {
+    let (timeline, config) = interpolation.into_inner();
     let interpolation_tick = timeline.tick();
     let interpolation_overstep = timeline.overstep().to_f32();
     for (mut component, history) in query.iter_mut() {
@@ -111,6 +145,7 @@ pub(crate) fn interpolate<C: Component<Mutability = Mutable> + Clone>(
             interpolation_tick,
             interpolation_overstep,
             interpolation_registry.as_ref(),
+            config.convergent_history,
         ) {
             *component = interpolated;
         }
@@ -393,8 +428,15 @@ mod tests {
             current_tick,
             Default::default(),
         ));
-        app.world_mut()
-            .spawn((timeline, IsSynced::<InterpolationTimeline>::default()));
+        app.world_mut().spawn((
+            timeline,
+            // these tests assert the convergent-mode behavior, so enable it explicitly
+            InterpolationConfig {
+                convergent_history: true,
+                ..Default::default()
+            },
+            IsSynced::<InterpolationTimeline>::default(),
+        ));
         app.add_systems(Update, update_confirmed_history::<TestComp>);
         app
     }
