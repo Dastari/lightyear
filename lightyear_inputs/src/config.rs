@@ -30,6 +30,12 @@ pub struct InputConfig<A> {
     /// It could be useful for a client to have access to other client's inputs to be able
     /// to predict their actions
     pub rebroadcast_inputs: bool,
+    /// How many ticks of input history to retain in the `InputBuffer`.
+    ///
+    /// A correction can only roll back as far as the retained history; deeper buffers tolerate
+    /// larger rollback windows at the cost of memory. Defaults to
+    /// [`DEFAULT_INPUT_HISTORY_DEPTH`](crate::DEFAULT_INPUT_HISTORY_DEPTH) (upstream-compatible).
+    pub history_depth: u16,
     pub marker: PhantomData<A>,
 }
 
@@ -50,6 +56,7 @@ impl<A> Default for InputConfig<A> {
             send_interval: Duration::default(),
             ignore_rollbacks: false,
             rebroadcast_inputs: false,
+            history_depth: crate::DEFAULT_INPUT_HISTORY_DEPTH,
             marker: PhantomData,
         }
     }

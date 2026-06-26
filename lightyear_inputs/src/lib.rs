@@ -20,13 +20,13 @@ pub mod plugin;
 #[cfg(feature = "server")]
 pub mod server;
 
-// Keep enough input history to cover deep rollback budgets.
-//
-// Upstream Lightyear 0.26.4 keeps only 20 ticks here, which is smaller than common rollback
-// windows in high-latency or localhost jitter scenarios. If a correction rolls back beyond this
-// depth, the client replays missing/neutral input and the predicted body can snap back to an older
-// seed. This should eventually become a public input config setting upstream.
-pub(crate) const HISTORY_DEPTH: u16 = 512;
+/// Default input-history retention depth, in ticks — matches upstream Lightyear 0.26.4.
+///
+/// A correction can only roll back as far as the retained input history. Deeper buffers tolerate
+/// larger rollback windows (high latency / localhost jitter) at the cost of memory; below this
+/// depth the client replays missing/neutral input and the predicted body can snap back to an older
+/// seed. Override per-`Action` with [`InputConfig::history_depth`](crate::config::InputConfig::history_depth).
+pub const DEFAULT_INPUT_HISTORY_DEPTH: u16 = 20;
 
 /// Default channel to send inputs from client to server. This is a Sequenced Unreliable channel.
 /// A marker struct for the default channel used to send inputs from client to server.

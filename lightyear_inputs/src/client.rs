@@ -50,7 +50,7 @@ use crate::input_message::{
     PerTargetData, StateMut, StateRef,
 };
 use crate::plugin::InputPlugin;
-use crate::{HISTORY_DEPTH, InputChannel};
+use crate::InputChannel;
 #[cfg(feature = "metrics")]
 use alloc::format;
 use alloc::{vec, vec::Vec};
@@ -437,6 +437,7 @@ fn get_delayed_action_state<S: ActionStateSequence>(
 /// System that removes old entries from the InputBuffer
 fn clean_buffers<S: ActionStateSequence>(
     timeline: Res<LocalTimeline>,
+    config: Res<InputConfig<S::Action>>,
     // NOTE: we skip this for host-client because the get_action_state system on the server
     //  also clears the buffers
     _sender: Single<(), (With<InputTimeline>, Without<HostClient>)>,
@@ -445,8 +446,8 @@ fn clean_buffers<S: ActionStateSequence>(
         Allow<PredictionDisable>,
     >,
 ) {
-    // assuming that we don't rollback more than 20 ticks, or send more than 20 ticks worth of inputs
-    let old_tick = timeline.tick() - HISTORY_DEPTH;
+    // Keep `history_depth` ticks of input history so corrections can roll back that far.
+    let old_tick = timeline.tick() - config.history_depth;
 
     // trace!(
     //     "popping all input buffers since old tick: {old_tick:?}",

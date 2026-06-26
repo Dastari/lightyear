@@ -1,6 +1,7 @@
 //! Handle input messages received from the clients
 
-use crate::HISTORY_DEPTH;
+use crate::DEFAULT_INPUT_HISTORY_DEPTH;
+use crate::config::InputConfig;
 #[cfg(feature = "prediction")]
 use crate::InputChannel;
 use crate::input_buffer::InputBuffer;
@@ -422,6 +423,7 @@ fn update_action_state<S: ActionStateSequence>(
     //  presumably the entity is replicated to many clients, but only one client is controlling the entity?
     timeline: Res<LocalTimeline>,
     server: Single<(Entity, Has<HostServer>), With<Started>>,
+    input_config: Option<Res<InputConfig<S::Action>>>,
     mut action_state_query: Query<(
         Entity,
         StateMut<S>,
@@ -466,7 +468,10 @@ fn update_action_state<S: ActionStateSequence>(
         // Basically, in host-client we are producer of inputs, so we need to include some redundancy. (like when
         // normal clients send inputs)
         let history_depth = if host_client {
-            HISTORY_DEPTH
+            // a host-client also produces inputs, so honor the client's configured history depth
+            input_config
+                .as_ref()
+                .map_or(DEFAULT_INPUT_HISTORY_DEPTH, |c| c.history_depth)
         } else {
             // if we are a server and not a host-client, there is no need to keep history
             1
