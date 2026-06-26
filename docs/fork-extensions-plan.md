@@ -10,9 +10,15 @@ divergence behind an opt-in, with a one-call preset to enable the full set.
 - **Opinionated behavior changes are opt-in**, via runtime config on the existing per-subsystem
   config structs, each defaulting to the upstream value.
 - A preset (`enable_fork_extensions()` / `ForkExtensions::all()`) flips every opt-in on at once.
-- **Acceptance test:** with no opt-ins, the inherited `lightyear_tests` suite's 9 currently-failing
-  tests must pass (they fail today only because fork opinions are on). Fork behaviors get their own
+- **Acceptance test:** run `lightyear_tests` **serially** (`cargo test --lib -- --test-threads=1` —
+  the suite is parallel-flaky, see below) with no opt-ins; the deterministic failures must drop to
+  zero. Baseline after Phase 1 is **4** deterministic failures (`leafwing::test_server_just_pressed`,
+  `prediction::history::test_update_history`, `prediction::prespawn::test_compute_hash`,
+  `host_server::input::bei::test_rebroadcast`) — addressed by Phases 3-4. Fork behaviors get their own
   tests run with the opt-ins enabled.
+- **Known separate issue:** the suite is **non-deterministically flaky in parallel** (7-10 failures
+  vs 4 serial) — tests share global state. This is a fork-test-hygiene item, independent of the
+  opt-in work; always gate acceptance on the serial run.
 
 You do **not** make crash-protection or silent bug-fixes opt-in — that would ship known
 crashes/bugs by default. "Global opt-in" applies to behavioral opinions only.
