@@ -1,17 +1,61 @@
-# Lightyear
-
-[![crates.io](https://img.shields.io/crates/v/lightyear)](https://crates.io/crates/lightyear)
-[![docs.rs](https://docs.rs/lightyear/badge.svg)](https://docs.rs/lightyear)
-[![codecov](https://codecov.io/gh/cBournhonesque/lightyear/branch/main/graph/badge.svg?token=N1G28NQB1L)](https://codecov.io/gh/cBournhonesque/lightyear)
+# Lightyear (fork)
 
 A library for writing server-authoritative multiplayer games with [Bevy](https://bevyengine.org/). Compatible with wasm
 via WebTransport.
+
+> ### Fork notice
+>
+> This is a **hard fork** of [`cBournhonesque/lightyear`](https://github.com/cBournhonesque/lightyear),
+> **permanently diverged** from the upstream `0.26.4` line. It deliberately **keeps the original custom
+> replication backend** — it does **not** adopt the `bevy_replicon` rewrite that upstream shipped in
+> `0.27` — and retains the flat workspace layout. On top of that base it adds independent Bevy-version
+> support plus extra hardening and features (see [Fork additions](#fork-additions)).
+>
+> **✅ Bevy 0.19-ready** — this fork targets **Bevy 0.19** (`avian` 0.7, `aeronet` 0.21, MSRV 1.95).
 
 https://github.com/cBournhonesque/lightyear/assets/8112632/7b57d48a-d8b0-4cdd-a16f-f991a394c852
 
 *Demo using one server with 2 clients. The entity is predicted (slightly ahead of server) on the controlling client and
 interpolated (slightly behind server) on the other client.
 The server only sends updates to clients 10 times per second but the clients still see smooth updates.*
+
+## Fork additions
+
+Beyond the upstream `0.26.4` base, this fork adds or changes the following (all transport- and project-agnostic):
+
+**Bevy support**
+
+- Migrated to **Bevy 0.19** (`avian` 0.7, `aeronet` 0.21, MSRV 1.95).
+
+**Wire-decode / DoS hardening**
+
+- Bounded length-prefix decode in `serde`/`replication` — oversized `Bytes`/`Vec`/`HashMap` length prefixes are rejected (anti-OOM), and `ComponentRegistry::remove` returns a `Result` instead of panicking.
+- Fragment-receiver metadata validation to prevent remote panic/OOM on malformed fragments.
+- Inbound decode-reject metering with tamed log spam.
+- `FRAGMENT_SIZE` computed from worst-case varint metadata so fragments never exceed the MTU.
+
+**Input handling**
+
+- Configurable, deeper input-history retention and prepare-input rate limiting.
+- Native input-state sequence exposed; input-target authorization with a bounded `end_tick` lookahead; server input pop keeps the last value as a `get_predict` fallback.
+
+**Prediction & interpolation robustness**
+
+- Seed predicted history when `Predicted` is added late; initialize confirmed history when `Interpolated` is added late.
+- Keep interpolation history convergent; panic-safe (`try_`) commands in the interpolation apply path.
+
+**Delta compression**
+
+- Delta keyframes and Avian2D velocity diffs; monotonic ack ticks; fall back to a base diff when the acked base is missing.
+
+**Replication & Avian**
+
+- Replication send-metrics observer; transform bootstrap on late sync-lane adoption; f64 Avian2D visual correction.
+
+**Transport**
+
+- UDP: preserve sends under socket backpressure (retry on `WouldBlock`); evict a peer's UDP address on `LinkOf` unlink.
+- WebTransport: optional `server_host` for DNS-based connect URLs.
 
 ## Getting started 
 
@@ -92,9 +136,10 @@ You can also find more information in this WIP [book](https://cbournhonesque.git
 
 ## Supported bevy version
 
-| Lightyear | Bevy |
-|-----------|------|
-| 0.26      | 0.18 |
+| Lightyear           | Bevy |
+|---------------------|------|
+| this fork (`main`)  | 0.19 |
+| 0.26                | 0.18 |
 | 0.25      | 0.17 |
 | 0.20-0.24 | 0.16 |
 | 0.18-0.19 | 0.15 |

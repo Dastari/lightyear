@@ -20,7 +20,7 @@ pub mod plugin;
 #[cfg(feature = "server")]
 pub mod server;
 
-// Keep enough input history to cover Sidereal's configured rollback budget.
+// Keep enough input history to cover deep rollback budgets.
 //
 // Upstream Lightyear 0.26.4 keeps only 20 ticks here, which is smaller than common rollback
 // windows in high-latency or localhost jitter scenarios. If a correction rolls back beyond this
