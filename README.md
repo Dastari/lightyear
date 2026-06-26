@@ -19,43 +19,42 @@ https://github.com/cBournhonesque/lightyear/assets/8112632/7b57d48a-d8b0-4cdd-a1
 interpolated (slightly behind server) on the other client.
 The server only sends updates to clients 10 times per second but the clients still see smooth updates.*
 
-## Fork additions
+## Fork extensions
 
-Beyond the upstream `0.26.4` base, this fork adds or changes the following (all transport- and project-agnostic):
+This fork is **upstream-compatible by default**: a default build behaves like upstream `0.26.4` plus
+always-on security/correctness hardening. Every *opinionated* behavior change is **opt-in**, so other
+projects get vanilla behavior unless they ask for more. Targets **Bevy 0.19** (`avian` 0.7,
+`aeronet` 0.21, MSRV 1.95).
 
-**Bevy support**
+### Opt-in behaviors (default = upstream)
 
-- Migrated to **Bevy 0.19** (`avian` 0.7, `aeronet` 0.21, MSRV 1.95).
+| Extension | Default | Enable |
+| --- | --- | --- |
+| Deeper input-history retention (rollback reach) | 20 ticks | `InputConfig { history_depth, .. }` (per `Action`) |
+| Convergent interpolation (smart-drain + idle-rebase + clamp-at-newest, vs. extrapolate) | off | `InterpolationConfig::default().with_convergent_history(true)` on the client |
+| Input target authorization (drop forged `InputTarget::Entity`) | off | `app.add_input_validator(authorize_controlled_targets::<S>)` |
+| Late-attach init (seed prediction/interpolation history + bootstrap avian `Transform` on out-of-order lane adoption) | off | `app.insert_resource(ForkExtensions::all())` |
 
-**Wire-decode / DoS hardening**
+`InputSystems::ValidateInputs` + `add_input_validator` are also the general seam for game-side input
+validation — drop/clamp/authorize received messages (via `MessageReceiver::retain_messages`) before
+they are buffered.
 
-- Bounded length-prefix decode in `serde`/`replication` — oversized `Bytes`/`Vec`/`HashMap` length prefixes are rejected (anti-OOM), and `ComponentRegistry::remove` returns a `Result` instead of panicking.
-- Fragment-receiver metadata validation to prevent remote panic/OOM on malformed fragments.
-- Inbound decode-reject metering with tamed log spam.
-- `FRAGMENT_SIZE` computed from worst-case varint metadata so fragments never exceed the MTU.
+### Always-on (security & correctness — not opt-in)
 
-**Input handling**
+- **Wire-decode / DoS hardening:** bounded length-prefix decode (anti-OOM) in `serde`/`replication`,
+  fragment-metadata validation, `FRAGMENT_SIZE` from worst-case varint sizes, inbound decode-reject
+  metering, and the input `end_tick` lookahead bound (protects `InputBuffer` from OOM).
+- **Correctness:** delta-ack monotonicity, base-diff fallback when an ack base is missing, panic-safe
+  (`try_`) interpolation commands.
+- **Resilience:** UDP send-preservation under backpressure, peer-address eviction on `LinkOf` unlink.
 
-- Configurable, deeper input-history retention and prepare-input rate limiting.
-- Native input-state sequence exposed; input-target authorization with a bounded `end_tick` lookahead; server input pop keeps the last value as a `get_predict` fallback.
+### Already opt-in (upstream-compatible defaults)
 
-**Prediction & interpolation robustness**
-
-- Seed predicted history when `Predicted` is added late; initialize confirmed history when `Interpolated` is added late.
-- Keep interpolation history convergent; panic-safe (`try_`) commands in the interpolation apply path.
-
-**Delta compression**
-
-- Delta keyframes and Avian2D velocity diffs; monotonic ack ticks; fall back to a base diff when the acked base is missing.
-
-**Replication & Avian**
-
-- Replication send-metrics observer; transform bootstrap on late sync-lane adoption; f64 Avian2D visual correction.
-
-**Transport**
-
-- UDP: preserve sends under socket backpressure (retry on `WouldBlock`); evict a peer's UDP address on `LinkOf` unlink.
-- WebTransport: optional `server_host` for DNS-based connect URLs.
+- Delta keyframes + Avian2D velocity diffs (`add_delta_compression_with_keyframe_interval`).
+- Replication send-metrics observer (`ReplicationSendMetricsObserver`).
+- WebTransport DNS host (`WebTransportClientIo.server_host`).
+- f64 Avian2D visual correction (the `f64` Cargo feature).
+- Native input-state sequence visibility; prepare-input send-rate via `InputConfig::send_interval`.
 
 ## Getting started 
 
