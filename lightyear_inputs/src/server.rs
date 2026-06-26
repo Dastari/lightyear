@@ -120,6 +120,43 @@ pub(crate) fn is_input_within_lookahead(end_tick: Tick, server_tick: Tick) -> bo
     (-MAX_INPUT_PAST_TICKS..=MAX_INPUT_LOOKAHEAD_TICKS).contains(&delta)
 }
 
+/// Opt-in [`InputSystems::ValidateInputs`] system that drops `InputTarget::Entity` entries a sender
+/// is not authorized to control (not in its [`ControlledByRemote`]), before they are buffered or
+/// rebroadcast — so a modified client cannot forge `InputTarget::Entity(other)` to drive another
+/// player. Host clients (`is_local`) and `InputTarget::PreSpawned` are exempt; a message left with
+/// no authorized targets is dropped entirely.
+///
+/// **Not registered by default.** Opt in with
+/// `app.add_input_validator(authorize_controlled_targets::<S>)`. Mirrors upstream
+/// cBournhonesque/lightyear#1526: lightyear deliberately does not treat `ControlledBy` as an
+/// authoritative flag, so this defense is opt-in rather than always-on.
+pub fn authorize_controlled_targets<S: ActionStateSequence>(
+    mut receivers: Query<
+        (
+            &mut MessageReceiver<InputMessage<S>>,
+            &RemoteId,
+            Option<&ControlledByRemote>,
+        ),
+        With<Connected>,
+    >,
+) {
+    for (mut receiver, client_id, controlled_by_remote) in receivers.iter_mut() {
+        if client_id.is_local() {
+            continue;
+        }
+        receiver.retain_messages(|message| {
+            message.inputs.retain(|data| match data.target {
+                InputTarget::Entity(entity) => {
+                    is_input_target_authorized(entity, controlled_by_remote)
+                }
+                InputTarget::PreSpawned(_) => true,
+            });
+            // drop the whole message if nothing authorized remains
+            !message.inputs.is_empty()
+        });
+    }
+}
+
 /// Server-side plugin that receives input messages from clients and applies
 /// them to [`InputBuffer`](crate::input_buffer::InputBuffer) components.
 ///
@@ -150,10 +187,37 @@ pub type InputSet = InputSystems;
 
 #[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum InputSystems {
+    /// Opt-in validation pass over received `InputMessage`s (drop/clamp/authorize) before they are
+    /// buffered or rebroadcast. Empty by default; runs after `MessageSystems::Receive` and before
+    /// [`Self::ReceiveInputs`]. Register systems here with
+    /// [`add_input_validator`](InputValidatorAppExt::add_input_validator).
+    ValidateInputs,
     /// Receive the latest ActionDiffs from the client
     ReceiveInputs,
     /// Use the ActionDiff received from the client to update the `ActionState`
     UpdateActionState,
+}
+
+/// Extension to register a system into [`InputSystems::ValidateInputs`] — the seam for game-side
+/// input validation (drop/clamp/authorize received messages before they are buffered).
+///
+/// A validator is a normal Bevy system with full ECS access; mutate/drop buffered messages with
+/// [`MessageReceiver::retain_messages`](lightyear_messages::prelude::MessageReceiver::retain_messages).
+/// See [`authorize_controlled_targets`] for a ready-made opt-in helper.
+pub trait InputValidatorAppExt {
+    fn add_input_validator<M>(
+        &mut self,
+        system: impl IntoScheduleConfigs<bevy_ecs::system::ScheduleSystem, M>,
+    ) -> &mut Self;
+}
+
+impl InputValidatorAppExt for App {
+    fn add_input_validator<M>(
+        &mut self,
+        system: impl IntoScheduleConfigs<bevy_ecs::system::ScheduleSystem, M>,
+    ) -> &mut Self {
+        self.add_systems(PreUpdate, system.in_set(InputSystems::ValidateInputs))
+    }
 }
 
 /// Component that is used to customize how inputs will be rebroadcasted
@@ -203,7 +267,12 @@ impl<S: ActionStateSequence + MapEntities> Plugin for ServerInputPlugin<S> {
         //  - but host-server broadcasting their inputs only updates `state`
         app.configure_sets(
             PreUpdate,
-            (MessageSystems::Receive, InputSystems::ReceiveInputs).chain(),
+            (
+                MessageSystems::Receive,
+                InputSystems::ValidateInputs,
+                InputSystems::ReceiveInputs,
+            )
+                .chain(),
         );
         app.configure_sets(FixedPreUpdate, InputSystems::UpdateActionState);
 
@@ -245,11 +314,6 @@ fn receive_input_message<S: ActionStateSequence>(
             &mut MessageReceiver<InputMessage<S>>,
             &RemoteId,
             Option<&InputRebroadcaster<S::Action>>,
-            // List of entities this peer is authorized to control.
-            // Inputs targeting entities outside this list are dropped
-            // so a modified client cannot forge
-            // `InputTarget::Entity(other)` to hijack another player.
-            Option<&ControlledByRemote>,
         ),
         // We also receive inputs from the HostClient, in case we want the HostClient's inputs to be
         // rebroadcast to other clients (so that they can do prediction of the HostClient's entity)
@@ -260,7 +324,7 @@ fn receive_input_message<S: ActionStateSequence>(
     mut commands: Commands,
 ) -> Result {
     // TODO: use par_iter_mut
-    receivers.iter_mut().try_for_each(|(client_entity, link_of, mut receiver, client_id, rebroadcaster, controlled_by_remote)| {
+    receivers.iter_mut().try_for_each(|(client_entity, link_of, mut receiver, client_id, rebroadcaster)| {
         // TODO: this drains the messages... but the user might want to re-broadcast them?
         //  should we just read instead?
         let server_entity = link_of.server;
@@ -291,37 +355,15 @@ fn receive_input_message<S: ActionStateSequence>(
                 return Ok(())
             }
 
-            // Connection-level metadata: apply before the target filter
-            // so it still updates when every target is dropped.
             #[cfg(feature = "interpolation")]
             if let Some(interpolation_delay) = message.interpolation_delay {
                 commands.entity(client_entity).insert(interpolation_delay);
             }
 
-            // Filter pre-rebroadcast so the server doesn't relay forged
-            // entries to other clients.
-            if !client_id.is_local() {
-                let before = message.inputs.len();
-                message.inputs.retain(|data| match data.target {
-                    InputTarget::Entity(entity) => {
-                        is_input_target_authorized(entity, controlled_by_remote)
-                    }
-                    InputTarget::PreSpawned(_) => true,
-                });
-                let dropped = before - message.inputs.len();
-                if dropped > 0 {
-                    trace!(
-                        ?tick,
-                        ?client_id,
-                        dropped,
-                        "Filtered unauthorized input targets (spoofed-target defense)",
-                    );
-                    if message.inputs.is_empty() {
-                        return Ok(())
-                    }
-                }
-            }
-
+            // NOTE: target authorization (dropping forged `InputTarget::Entity`) is an opt-in
+            // `ValidateInputs` pre-pass (`authorize_controlled_targets`), so by default any target
+            // reaches the buffer/rebroadcast below — matching upstream. The `end_tick` lookahead
+            // bound above stays always-on as it protects `InputBuffer::set_raw` from OOM.
             #[cfg(feature = "prediction")]
             if config.rebroadcast_inputs && let Ok(server) = server.get(server_entity) {
                 // only rebroadcast if the message is not already a rebroadcast
@@ -359,10 +401,9 @@ fn receive_input_message<S: ActionStateSequence>(
             for data in message.inputs {
                 let Some(entity) = (match data.target {
                     InputTarget::Entity(entity) => {
-                        // Authorization was already enforced by the
-                        // `message.inputs.retain` filter above (or
-                        // bypassed for `is_local()`); unauthorized
-                        // targets cannot reach this point.
+                        // If `authorize_controlled_targets` is registered (opt-in), unauthorized
+                        // targets were already dropped during `ValidateInputs`; otherwise any
+                        // target reaches here (upstream default).
                         Some(entity)
                     },
                     InputTarget::PreSpawned(hash) => {

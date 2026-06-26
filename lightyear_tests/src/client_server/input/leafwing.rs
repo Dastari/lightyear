@@ -476,10 +476,16 @@ fn test_input_message_with_spoofed_target_is_rejected() {
     };
     use lightyear::input::leafwing::input_message::{LeafwingSequence, LeafwingSnapshot};
     use lightyear::input::prelude::InputChannel;
+    use lightyear::input::prelude::server::{InputValidatorAppExt, authorize_controlled_targets};
     use lightyear_messages::prelude::MessageSender;
     use lightyear_replication::prelude::ControlledBy;
 
     let mut stepper = ClientServerStepper::from_config(StepperConfig::with_netcode_clients(2));
+
+    // Target authorization is opt-in; register the validator so forged targets are dropped.
+    stepper
+        .server_app
+        .add_input_validator(authorize_controlled_targets::<LeafwingSequence<LeafwingInput1>>);
 
     let client_of_0 = stepper.client_of(0).id();
     let client_of_1 = stepper.client_of(1).id();
@@ -601,9 +607,16 @@ fn test_input_message_with_spoofed_target_is_rejected() {
 /// fires before the rebroadcast / per-target-apply blocks.
 #[test]
 fn test_input_message_with_only_spoofed_targets_filters_to_empty() {
+    use lightyear::input::leafwing::input_message::LeafwingSequence;
+    use lightyear::input::prelude::server::{InputValidatorAppExt, authorize_controlled_targets};
     use lightyear_replication::prelude::ControlledBy;
 
     let mut stepper = ClientServerStepper::from_config(StepperConfig::with_netcode_clients(2));
+
+    // Target authorization is opt-in; register the validator so forged targets are dropped.
+    stepper
+        .server_app
+        .add_input_validator(authorize_controlled_targets::<LeafwingSequence<LeafwingInput1>>);
     let client_of_1 = stepper.client_of(1).id();
 
     let victim_server_entity = stepper

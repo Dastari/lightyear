@@ -89,6 +89,16 @@ impl<M: Message> MessageReceiver<M> {
         self.recv.drain(..)
     }
 
+    /// Mutate and/or drop buffered messages in place, before they are drained by
+    /// [`Self::receive`]. Returning `false` drops the message; per-message metadata
+    /// (`remote_tick`/`channel_kind`/`message_id`) is preserved for the kept messages.
+    ///
+    /// This is the building block for pre-buffer validation passes (e.g. clamp / authorize /
+    /// rate-limit received inputs before they are consumed).
+    pub fn retain_messages(&mut self, mut keep: impl FnMut(&mut M) -> bool) {
+        self.recv.retain_mut(|m| keep(&mut m.data));
+    }
+
     pub fn num_messages(&self) -> usize {
         self.recv.len()
     }
