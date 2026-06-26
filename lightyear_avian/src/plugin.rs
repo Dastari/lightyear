@@ -69,6 +69,7 @@ use {
 };
 
 use lightyear_frame_interpolation::FrameInterpolationSystems;
+use lightyear_core::fork::{ForkExtensions, late_attach_init_enabled};
 use lightyear_interpolation::prelude::{Interpolated, InterpolationRegistry};
 use lightyear_prediction::plugin::PredictionSystems;
 use lightyear_prediction::prelude::{Predicted, PredictionAppRegistrationExt, RollbackSystems};
@@ -655,8 +656,13 @@ impl LightyearAvianPlugin {
             Option<&Position>,
             Option<&Rotation>,
         )>,
+        fork: Option<Res<ForkExtensions>>,
         mut commands: Commands,
     ) {
+        // Opt-in late-attach: bootstrap a Transform when an entity adopts Predicted late.
+        if !late_attach_init_enabled(fork.as_deref()) {
+            return;
+        }
         Self::add_transform_for_existing_spatial_entity(
             trigger.entity,
             &query,
@@ -674,8 +680,13 @@ impl LightyearAvianPlugin {
             Option<&Position>,
             Option<&Rotation>,
         )>,
+        fork: Option<Res<ForkExtensions>>,
         mut commands: Commands,
     ) {
+        // Opt-in late-attach: bootstrap a Transform when an entity adopts Interpolated late.
+        if !late_attach_init_enabled(fork.as_deref()) {
+            return;
+        }
         Self::add_transform_for_existing_spatial_entity(
             trigger.entity,
             &query,

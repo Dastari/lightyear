@@ -9,6 +9,7 @@ use lightyear_core::history_buffer::HistoryBuffer;
 #[cfg(test)]
 use lightyear_core::history_buffer::HistoryState;
 use lightyear_core::prelude::LocalTimeline;
+use lightyear_core::fork::{ForkExtensions, late_attach_init_enabled};
 use lightyear_core::timeline::SyncEvent;
 use lightyear_replication::prelude::{Confirmed, PreSpawned};
 use lightyear_sync::prelude::InputTimelineConfig;
@@ -101,6 +102,7 @@ pub(crate) fn add_prediction_history<C: Component + Clone>(
     >,
     mut commands: Commands,
     timeline: Res<LocalTimeline>,
+    fork: Option<Res<ForkExtensions>>,
     // TODO: should we also have With<ShouldBePredicted>?
     query: Query<
         Option<&C>,
@@ -122,7 +124,9 @@ pub(crate) fn add_prediction_history<C: Component + Clone>(
             trigger.entity
         );
         let mut history = PredictionHistory::<C>::default();
-        if let Some(component) = component {
+        // Opt-in late-attach: seed with the current value so a late attach doesn't start empty
+        // (upstream default: empty history).
+        if late_attach_init_enabled(fork.as_deref()) && let Some(component) = component {
             history.add_update(timeline.tick(), component.clone());
         }
         commands.entity(trigger.entity).insert(history);
@@ -142,6 +146,7 @@ pub(crate) fn add_prediction_history_on_predicted<C: Component + Clone>(
     trigger: On<Add, Predicted>,
     mut commands: Commands,
     timeline: Res<LocalTimeline>,
+    fork: Option<Res<ForkExtensions>>,
     query: Query<
         Option<&C>,
         (
@@ -151,6 +156,11 @@ pub(crate) fn add_prediction_history_on_predicted<C: Component + Clone>(
         ),
     >,
 ) {
+    // Opt-in late-attach: this whole bootstrap is a fork extension (upstream has no observer that
+    // seeds history when `Predicted` is added late).
+    if !late_attach_init_enabled(fork.as_deref()) {
+        return;
+    }
     if let Ok(component) = query.get(trigger.entity) {
         trace!(
             "Add prediction history for {:?} on predicted entity {:?}",
@@ -180,6 +190,7 @@ mod tests {
         let mut timeline = LocalTimeline::default();
         timeline.apply_delta(9);
         app.insert_resource(timeline);
+        app.insert_resource(ForkExtensions::all());
         app.add_observer(add_prediction_history::<TestComp>);
         app.add_observer(add_prediction_history_on_predicted::<TestComp>);
 
@@ -205,6 +216,7 @@ mod tests {
         let mut timeline = LocalTimeline::default();
         timeline.apply_delta(17);
         app.insert_resource(timeline);
+        app.insert_resource(ForkExtensions::all());
         app.add_observer(add_prediction_history::<TestComp>);
         app.add_observer(add_prediction_history_on_predicted::<TestComp>);
 

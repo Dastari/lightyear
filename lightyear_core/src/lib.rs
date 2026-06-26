@@ -35,6 +35,8 @@ pub mod interpolation;
 
 pub mod prediction;
 
+pub mod fork;
+
 #[cfg(feature = "test_utils")]
 pub mod test;
 
@@ -43,6 +45,8 @@ pub mod prelude {
     pub use crate::interpolation::Interpolated;
 
     pub use crate::prediction::Predicted;
+
+    pub use crate::fork::ForkExtensions;
 
     pub use crate::id::{LocalId, PeerId, RemoteId};
     pub use crate::tick::Tick;

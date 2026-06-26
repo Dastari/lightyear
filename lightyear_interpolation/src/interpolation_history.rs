@@ -4,6 +4,7 @@ use bevy_ecs::prelude::Changed;
 use bevy_ecs::prelude::*;
 use bevy_reflect::Reflect;
 use bevy_utils::prelude::DebugName;
+use lightyear_core::fork::{ForkExtensions, late_attach_init_enabled};
 use lightyear_core::history_buffer::{HistoryBuffer, HistoryState};
 use lightyear_core::prelude::Tick;
 use lightyear_replication::components::{Confirmed, ConfirmedTick};
@@ -146,8 +147,14 @@ pub(crate) fn insert_confirmed_history<C: Component>(
 pub(crate) fn insert_confirmed_history_on_interpolated<C: Component>(
     trigger: On<Add, Interpolated>,
     mut commands: Commands,
+    fork: Option<Res<ForkExtensions>>,
     query: Query<(), (With<Confirmed<C>>, Without<ConfirmedHistory<C>>)>,
 ) {
+    // Opt-in late-attach: upstream only creates `ConfirmedHistory` on the Confirmed-then-Interpolated
+    // order; this observer additionally handles Interpolated-then-Confirmed.
+    if !late_attach_init_enabled(fork.as_deref()) {
+        return;
+    }
     if query.get(trigger.entity).is_ok() {
         commands
             .entity(trigger.entity)
@@ -222,6 +229,7 @@ mod tests {
         let mut app = App::new();
         app.add_observer(insert_confirmed_history::<TestComp>);
         app.add_observer(insert_confirmed_history_on_interpolated::<TestComp>);
+        app.insert_resource(ForkExtensions::all());
 
         let entity = app.world_mut().spawn(Interpolated).id();
         app.update();
@@ -242,6 +250,7 @@ mod tests {
         let mut app = App::new();
         app.add_observer(insert_confirmed_history::<TestComp>);
         app.add_observer(insert_confirmed_history_on_interpolated::<TestComp>);
+        app.insert_resource(ForkExtensions::all());
 
         let entity = app
             .world_mut()
