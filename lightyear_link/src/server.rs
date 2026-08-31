@@ -1,4 +1,4 @@
-use crate::{LinkPlugin, Linked, Linking, Unlink, Unlinked};
+use crate::{Link, LinkPlugin, Linked, Linking, RecvLinkConditioner, Unlink, Unlinked};
 use alloc::{format, string::String, vec::Vec};
 use bevy_app::{App, Plugin};
 use bevy_ecs::lifecycle::HookContext;
@@ -11,18 +11,34 @@ use bevy_ecs::{
 };
 use bevy_reflect::Reflect;
 use bevy_utils::prelude::DebugName;
+use lightyear_core::time::Instant;
 #[allow(unused_imports)]
 use tracing::{trace, warn};
 // TODO: should we also have a LinkId (remote addr/etc.) that uniquely identifies the link?
 
-#[derive(Component, Default, Debug, PartialEq, Eq, Reflect)]
+#[derive(Component, Default, Debug, Reflect)]
 #[component(on_add = Server::on_add)]
 #[relationship_target(relationship = LinkOf, linked_spawn)]
 pub struct Server {
+    #[relationship]
     links: Vec<Entity>,
+    /// Receive conditioner cloned into each new [`LinkOf`] child.
+    ///
+    /// The server endpoint does not receive packets itself. This conditioner is a template; each
+    /// child link receives an independent clone whose runtime state lives in [`Link::recv`].
+    #[reflect(ignore)]
+    pub conditioner: Option<RecvLinkConditioner>,
 }
 
 impl Server {
+    /// Creates a server with an optional receive conditioner for its child links.
+    pub fn new(conditioner: Option<RecvLinkConditioner>) -> Self {
+        Self {
+            links: Vec::new(),
+            conditioner,
+        }
+    }
+
     fn on_add(mut world: DeferredWorld, context: HookContext) {
         let entity_ref = world.entity(context.entity);
         if !entity_ref.contains::<Unlinked>()
@@ -54,6 +70,38 @@ impl Server {
                 }
             }
         }
+    }
+}
+
+/// Copies a server's receive conditioner into each newly-created client link.
+///
+/// A server entity is only the listening endpoint; packets are received by its [`LinkOf`] child
+/// entities. Keeping the conditioner in [`Link::recv`] lets all IO backends use their existing
+/// receive path unchanged.
+fn add_server_link_conditioner(
+    trigger: On<Add, LinkOf>,
+    mut links: Query<(&LinkOf, &mut Link)>,
+    servers: Query<&Server>,
+) {
+    let Ok((link_of, mut link)) = links.get_mut(trigger.entity) else {
+        return;
+    };
+    let Ok(server) = servers.get(link_of.server) else {
+        return;
+    };
+    let Some(conditioner) = &server.conditioner else {
+        return;
+    };
+    if link.recv.conditioner.is_some() {
+        return;
+    }
+
+    // A backend may queue packets before deferred observers run. Reinsert them so they are
+    // conditioned too instead of bypassing the newly inherited template.
+    let queued_packets: Vec<_> = link.recv.drain().collect();
+    link.recv.conditioner = Some(conditioner.clone());
+    for packet in queued_packets {
+        link.recv.push(packet, Instant::now());
     }
 }
 
@@ -167,5 +215,110 @@ impl Plugin for ServerLinkPlugin {
             app.add_plugins(LinkPlugin);
         }
         app.add_observer(Server::unlinked);
+        app.add_observer(add_server_link_conditioner);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conditioner::LinkConditionerConfig;
+    use core::time::Duration;
+
+    #[test]
+    fn link_of_inherits_server_conditioner() {
+        let mut app = App::new();
+        app.add_plugins(ServerLinkPlugin);
+        let server = app
+            .world_mut()
+            .spawn(Server::new(Some(RecvLinkConditioner::new(
+                LinkConditionerConfig {
+                    incoming_latency: Duration::from_millis(100),
+                    ..Default::default()
+                },
+            ))))
+            .id();
+
+        let link = app
+            .world_mut()
+            .spawn((LinkOf { server }, Link::default()))
+            .id();
+
+        assert!(
+            app.world()
+                .entity(link)
+                .get::<Link>()
+                .unwrap()
+                .recv
+                .conditioner
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn existing_link_conditioner_is_not_overwritten() {
+        let mut app = App::new();
+        app.add_plugins(ServerLinkPlugin);
+        let server = app
+            .world_mut()
+            .spawn(Server::new(Some(RecvLinkConditioner::new(
+                LinkConditionerConfig {
+                    incoming_latency: Duration::from_millis(100),
+                    ..Default::default()
+                },
+            ))))
+            .id();
+        let link = app
+            .world_mut()
+            .spawn((
+                LinkOf { server },
+                Link::new(Some(RecvLinkConditioner::new(LinkConditionerConfig {
+                    incoming_loss: 1.0,
+                    ..Default::default()
+                }))),
+            ))
+            .id();
+
+        let mut entity = app.world_mut().entity_mut(link);
+        let mut link = entity.get_mut::<Link>().unwrap();
+        link.recv
+            .push(bytes::Bytes::from_static(b"packet"), Instant::now());
+        assert_eq!(
+            link.recv.conditioner.as_ref().unwrap().time_queue.len(),
+            0,
+            "the link's loss=1 conditioner must survive server propagation"
+        );
+    }
+
+    #[test]
+    fn queued_packets_are_reinserted_through_the_inherited_conditioner() {
+        let mut app = App::new();
+        app.add_plugins(ServerLinkPlugin);
+        let server = app
+            .world_mut()
+            .spawn(Server::new(Some(RecvLinkConditioner::new(
+                LinkConditionerConfig {
+                    incoming_latency: Duration::from_millis(100),
+                    ..Default::default()
+                },
+            ))))
+            .id();
+        let link = app.world_mut().spawn(Link::default()).id();
+        app.world_mut()
+            .entity_mut(link)
+            .get_mut::<Link>()
+            .unwrap()
+            .recv
+            .push_raw(bytes::Bytes::from_static(b"early"));
+
+        app.world_mut().entity_mut(link).insert(LinkOf { server });
+
+        let link = app.world().entity(link).get::<Link>().unwrap();
+        assert_eq!(link.recv.len(), 0, "the raw receive buffer was drained");
+        assert_eq!(
+            link.recv.conditioner.as_ref().unwrap().time_queue.len(),
+            1,
+            "the early packet was queued in the inherited conditioner"
+        );
     }
 }

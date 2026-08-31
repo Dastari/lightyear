@@ -45,7 +45,8 @@ they are buffered.
   fragment-metadata validation, `FRAGMENT_SIZE` from worst-case varint sizes, inbound decode-reject
   metering, and the input `end_tick` lookahead bound (protects `InputBuffer` from OOM).
 - **Correctness:** delta-ack monotonicity, base-diff fallback when an ack base is missing, panic-safe
-  (`try_`) interpolation commands.
+  (`try_`) interpolation commands, and server receive-conditioner propagation to newly-created
+  child links (ported from upstream PR #1569).
 - **Resilience:** UDP send-preservation under backpressure, peer-address eviction on `LinkOf` unlink.
 
 ### Already opt-in (upstream-compatible defaults)

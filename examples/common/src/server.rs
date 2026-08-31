@@ -98,7 +98,10 @@ impl ExampleServer {
         world.commands().queue(move |world: &mut World| -> Result {
             let mut entity_mut = world.entity_mut(entity);
             let settings = entity_mut.take::<ExampleServer>().unwrap();
-            entity_mut.insert((Name::from("Server"),));
+            entity_mut.insert((
+                Name::from("Server"),
+                Server::new(settings.conditioner.clone()),
+            ));
 
             let add_netcode = |entity_mut: &mut EntityWorldMut| {
                 // Use private key from environment variable, if set. Otherwise from settings file.
